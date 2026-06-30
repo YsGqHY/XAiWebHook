@@ -1,0 +1,142 @@
+# XAiWebHook 默认配置
+# 本文件首次启动时自动生成。修改后执行 /xwebhook reload 即可热重载，无需重启 mirai。
+# 所有 ${...} 表达式仅做变量替换与基础条件判断，不会执行任意脚本。
+
+# HTTP 服务（接收外部 incoming 请求）相关设置
+server:
+  # 是否启动 HTTP 服务，false 时仅 outgoing 转发可用
+  enabled: true
+  # 监听地址。默认仅监听本机；需要接收外部请求时改为 "0.0.0.0"，
+  # 并务必配置强 token（auth.tokens），避免接口在公网裸奔
+  host: "127.0.0.1"
+  # 监听端口，取值范围 1-65535
+  port: 18080
+  # 所有 incoming 端点的统一路径前缀，最终路径 = base_path + 端点 path
+  base_path: "/webhook"
+
+# incoming 请求鉴权设置
+auth:
+  # 鉴权类型，目前仅支持 "bearer"；其它值会导致所有请求被拒
+  type: "bearer"
+  # 全局 Bearer Token 列表。端点未单独配置 tokens 时回退到此处。
+  # 生产环境务必替换默认值，使用足够长的随机串
+  tokens:
+    - "change-me-token"
+  # 为 true 时允许无 token 端点，但仅放行来自回环地址的请求
+  # （127.0.0.0/8 网段、localhost、::1 等）。绑定非回环 host 时开启会触发安全告警
+  allow_empty_for_localhost: false
+
+# 表达式模板设置
+templates:
+  # 是否启用 ${...} 表达式。为 false 时模板原样输出
+  enable_expressions: true
+  # 未解析到变量时的处理：true 保留原始 ${...} 文本，false 替换为空串
+  strict_missing_variables: false
+
+# 安全相关设置
+security:
+  # 命令执行全局开关。execute_command 动作需同时开启此项与动作自身 enabled 才会执行
+  allow_command_execution: false
+  # incoming 请求体最大字节数，超限返回 413；0 表示不限制
+  max_body_bytes: 1048576
+
+# 日志设置
+logging:
+  # 是否记录 incoming/outgoing 请求日志
+  request: true
+  # 是否记录 incoming 响应日志
+  response: true
+  # 是否记录错误堆栈
+  error_stacktrace: true
+  # 是否输出调试日志（各功能节点的详细 println，含配置/请求/动作/事件全过程）。
+  # 默认 false；排查问题时开启，会在控制台打印大量信息，生产环境建议关闭
+  debug: false
+
+# incoming：外部 HTTP 请求触发机器人动作
+incoming:
+  # 端点列表。每个端点：id 标识、enabled 是否启用、method 请求方法、
+  # path 相对 base_path 的子路径、tokens 端点专属 token（为空回退全局）、actions 命中后依次执行的动作
+  endpoints:
+    - id: "send-group"
+      enabled: true
+      method: "POST"
+      path: "/send-group"
+      actions:
+        # 发送群消息：group_id 必填且需可解析为数字，message 为文本
+        - type: "send_group_message"
+          group_id: "${request.body.group_id}"
+          message: "${request.body.message ?: \"\"}"
+        # reply 构造 HTTP 响应：status 状态码（默认 200），body 任意结构
+        - type: "reply"
+          status: 200
+          body:
+            success: true
+            message: "group message queued"
+
+    - id: "send-friend"
+      enabled: true
+      method: "POST"
+      path: "/send-friend"
+      actions:
+        # 发送好友消息：friend_id 必填且需可解析为数字，message 为文本
+        - type: "send_friend_message"
+          friend_id: "${request.body.friend_id}"
+          message: "${request.body.message ?: \"\"}"
+        - type: "reply"
+          status: 200
+          body:
+            success: true
+            message: "friend message queued"
+
+# outgoing：mirai 消息事件转发到外部 WebHook
+outgoing:
+  # 路由列表。匹配条件之间为「与」关系，未配置的条件跳过：
+  # events 事件类型(group_message/friend_message)、groups 群号、friends 好友号、
+  # senders 发送者 QQ、message 文本匹配器、condition 布尔条件、actions 匹配后执行的动作
+  routes:
+    - id: "group-message-forward"
+      # 示例路由默认关闭，启用前请先填入真实 URL
+      enabled: false
+      events: ["group_message"]
+      groups: [123456789]
+      message:
+        # contains/starts_with/ends_with/regex 四类，各为列表，类内任一命中即该类匹配
+        contains: ["关键词"]
+      actions:
+        # http_request：向外部发起 HTTP 请求。method 默认 POST，
+        # headers 为键值对，body 任意结构（序列化为 JSON）
+        - type: "http_request"
+          method: "POST"
+          url: "https://example.invalid/webhook/group-message"
+          headers:
+            Authorization: "Bearer change-me-token"
+          body:
+            type: "${event.type}"
+            bot_id: "${event.botId}"
+            group_id: "${event.groupId}"
+            sender_id: "${event.senderId}"
+            sender_name: "${event.senderName}"
+            message: "${event.messageText}"
+
+    - id: "friend-message-forward"
+      enabled: false
+      events: ["friend_message"]
+      actions:
+        - type: "http_request"
+          method: "POST"
+          url: "https://example.invalid/webhook/friend-message"
+          body:
+            type: "${event.type}"
+            bot_id: "${event.botId}"
+            friend_id: "${event.friendId}"
+            sender_id: "${event.senderId}"
+            sender_name: "${event.senderName}"
+            message: "${event.messageText}"
+
+# actions：可复用的命名动作，incoming/outgoing 可用字符串名或 ref 引用
+actions:
+  # 命令执行动作示例，默认 enabled: false 且需开启 security.allow_command_execution 才会执行
+  disabled-command-example:
+    type: "execute_command"
+    enabled: false
+    command: "say WebHook command execution is disabled by default"
