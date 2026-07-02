@@ -5,6 +5,7 @@ import kim.hhhhhy.x.webhook.model.ExecutionContext
 internal object TemplateEngine {
     private val expressionRegex = Regex("""\$\{([^}]+)}""")
     private const val MAX_DEPTH = 32
+    private const val REQUEST_BODY_MARKDOWN_IMAGE_THRESHOLD = 200
 
     fun render(value: Any?, context: ExecutionContext): Any? {
         return when (value) {
@@ -22,12 +23,29 @@ internal object TemplateEngine {
         return expressionRegex.replace(template) { match ->
             val expression = match.groupValues[1]
             val value = evaluateValue(expression, context)
-            when {
-                value != null -> value.toString()
-                context.config.templates.strictMissingVariables -> match.value
-                else -> ""
-            }
+            renderReplacementText(value, match.value, context)
         }
+    }
+
+    fun renderIncomingMessage(template: String, context: ExecutionContext): List<IncomingMessageSegment> {
+        if (!context.config.templates.enableExpressions) return listOf(IncomingMessageSegment.Text(template))
+
+        val segments = mutableListOf<IncomingMessageSegment>()
+        var cursor = 0
+        expressionRegex.findAll(template).forEach { match ->
+            segments.appendText(template.substring(cursor, match.range.first))
+            val expression = match.groupValues[1]
+            val markdownImage = requestBodyMarkdownImage(expression, context)
+            if (markdownImage != null) {
+                segments += IncomingMessageSegment.MarkdownImage(markdownImage)
+            } else {
+                val value = evaluateValue(expression, context)
+                segments.appendText(renderReplacementText(value, match.value, context))
+            }
+            cursor = match.range.last + 1
+        }
+        segments.appendText(template.substring(cursor))
+        return segments.ifEmpty { listOf(IncomingMessageSegment.Text("")) }
     }
 
     fun evaluateCondition(condition: String?, context: ExecutionContext): Boolean {
@@ -211,8 +229,46 @@ internal object TemplateEngine {
         else -> true
     }
 
+    private fun requestBodyMarkdownImage(expression: String, context: ExecutionContext): String? {
+        if (context.request == null) return null
+        val variable = primaryExpression(expression)
+        if (!variable.startsWith("request.body.")) return null
+        val value = evaluateValue(variable, context) ?: return null
+        val text = value.toString()
+        return text.takeIf { it.length > REQUEST_BODY_MARKDOWN_IMAGE_THRESHOLD }
+    }
+
+    private fun primaryExpression(expression: String): String {
+        val normalized = unwrapExpression(expression.trim())
+        val primary = splitTopLevel(normalized, "?:").firstOrNull().orEmpty()
+        return stripOuterParentheses(unwrapExpression(primary.trim()))
+    }
+
+    private fun renderReplacementText(value: Any?, original: String, context: ExecutionContext): String {
+        return when {
+            value != null -> value.toString()
+            context.config.templates.strictMissingVariables -> original
+            else -> ""
+        }
+    }
+
+    private fun MutableList<IncomingMessageSegment>.appendText(value: String): Unit {
+        if (value.isEmpty()) return
+        val last = lastOrNull()
+        if (last is IncomingMessageSegment.Text) {
+            this[lastIndex] = IncomingMessageSegment.Text(last.value + value)
+        } else {
+            this += IncomingMessageSegment.Text(value)
+        }
+    }
+
     private data class FunctionCall(
         val name: String,
         val arguments: String
     )
+}
+
+internal sealed class IncomingMessageSegment {
+    internal data class Text(val value: String) : IncomingMessageSegment()
+    internal data class MarkdownImage(val markdown: String) : IncomingMessageSegment()
 }

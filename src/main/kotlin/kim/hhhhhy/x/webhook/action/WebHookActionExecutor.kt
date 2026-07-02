@@ -17,6 +17,7 @@ import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ActionResult
 import kim.hhhhhy.x.webhook.model.ExecutionContext
+import kim.hhhhhy.x.webhook.template.IncomingMessageSegment
 import kim.hhhhhy.x.webhook.template.TemplateEngine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -28,7 +29,11 @@ import kotlinx.serialization.json.buildJsonObject
 import net.mamoe.mirai.console.command.CommandManager
 import net.mamoe.mirai.console.command.ConsoleCommandSender
 import net.mamoe.mirai.console.command.descriptor.ExperimentalCommandDescriptors
+import net.mamoe.mirai.contact.Contact
+import net.mamoe.mirai.message.data.Message
+import net.mamoe.mirai.message.data.MessageChainBuilder
 import net.mamoe.mirai.message.data.PlainText
+import net.mamoe.mirai.utils.ExternalResource.Companion.toExternalResource
 
 internal object WebHookActionExecutor {
     private val json = Json {
@@ -102,13 +107,14 @@ internal object WebHookActionExecutor {
         val bot = XAiWebHook.bot ?: error("no bot instance available")
         val groupId = renderString(action.params["group_id"], context).toLongOrNull()
             ?: error("group_id is required")
-        val message = renderString(action.params["message"], context)
-        val preview = message.take(20).let { if (message.length > 20) "$it..." else it }
+        val messageTemplate = action.params["message"]?.toString().orEmpty()
+        val renderedPreviewText = renderString(messageTemplate, context)
+        val preview = renderedPreviewText.take(20).let { if (renderedPreviewText.length > 20) "$it..." else it }
         WebHookDebug.log("""[XAiWebHook] [动作] 发送群消息
   groupId  : $groupId
   message  : $preview""")
         val group = bot.getGroup(groupId) ?: error("group not found: $groupId")
-        group.sendMessage(message)
+        group.sendMessage(renderIncomingMessage(messageTemplate, context, group))
         WebHookDebug.log("[XAiWebHook] [动作] 群消息发送成功：groupId=$groupId")
         return ActionResult(action.type, success = true, message = "sent group message", status = 200)
     }
@@ -117,13 +123,14 @@ internal object WebHookActionExecutor {
         val bot = XAiWebHook.bot ?: error("no bot instance available")
         val friendId = renderString(action.params["friend_id"], context).toLongOrNull()
             ?: error("friend_id is required")
-        val message = renderString(action.params["message"], context)
-        val preview = message.take(20).let { if (message.length > 20) "$it..." else it }
+        val messageTemplate = action.params["message"]?.toString().orEmpty()
+        val renderedPreviewText = renderString(messageTemplate, context)
+        val preview = renderedPreviewText.take(20).let { if (renderedPreviewText.length > 20) "$it..." else it }
         WebHookDebug.log("""[XAiWebHook] [动作] 发送好友消息
   friendId : $friendId
   message  : $preview""")
         val friend = bot.getFriend(friendId) ?: error("friend not found: $friendId")
-        friend.sendMessage(message)
+        friend.sendMessage(renderIncomingMessage(messageTemplate, context, friend))
         WebHookDebug.log("[XAiWebHook] [动作] 好友消息发送成功：friendId=$friendId")
         return ActionResult(action.type, success = true, message = "sent friend message", status = 200)
     }
@@ -179,6 +186,32 @@ internal object WebHookActionExecutor {
         // reply 表示"成功构造了一条响应"，HTTP 状态码由 status 字段携带（允许 4xx/5xx），
         // 不代表业务成败，因此 success 恒为 true，避免污染整体业务成功判定。
         return ActionResult(action.type, success = true, message = "reply", responseBody = body, status = status)
+    }
+
+    private suspend fun renderIncomingMessage(template: String, context: ExecutionContext, contact: Contact): Message {
+        val segments = TemplateEngine.renderIncomingMessage(template, context)
+        if (segments.size == 1 && segments.first() is IncomingMessageSegment.Text) {
+            return PlainText((segments.first() as IncomingMessageSegment.Text).value)
+        }
+
+        val builder = MessageChainBuilder()
+        segments.forEach { segment ->
+            when (segment) {
+                is IncomingMessageSegment.Text -> if (segment.value.isNotEmpty()) builder.append(PlainText(segment.value))
+                is IncomingMessageSegment.MarkdownImage -> builder.append(uploadMarkdownImage(segment.markdown, contact))
+            }
+        }
+        return builder.build()
+    }
+
+    private suspend fun uploadMarkdownImage(markdown: String, contact: Contact): Message {
+        val bytes = MarkdownImageRenderer.render(markdown)
+        val resource = bytes.toExternalResource("png")
+        return try {
+            contact.uploadImage(resource)
+        } finally {
+            resource.close()
+        }
     }
 
     private fun renderString(value: Any?, context: ExecutionContext): String {
