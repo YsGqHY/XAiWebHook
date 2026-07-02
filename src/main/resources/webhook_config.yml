@@ -62,7 +62,7 @@ incoming:
       method: "POST"
       path: "/send-group"
       actions:
-        # 发送群消息：group_id 必填且需可解析为数字，message 为文本
+        # 发送群消息：group_id 必填且需可解析为数字；message 支持模板，单个 request.body 变量超过 200 字符时会渲染为 Markdown 图片
         - type: "send_group_message"
           group_id: "${request.body.group_id}"
           message: "${request.body.message ?: \"\"}"
@@ -78,7 +78,7 @@ incoming:
       method: "POST"
       path: "/send-friend"
       actions:
-        # 发送好友消息：friend_id 必填且需可解析为数字，message 为文本
+        # 发送好友消息：friend_id 必填且需可解析为数字；message 支持模板，单个 request.body 变量超过 200 字符时会渲染为 Markdown 图片
         - type: "send_friend_message"
           friend_id: "${request.body.friend_id}"
           message: "${request.body.message ?: \"\"}"
