@@ -1,5 +1,7 @@
 package kim.hhhhhy.x.webhook.action
 
+import java.io.ByteArrayInputStream
+import javax.imageio.ImageIO
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
@@ -50,8 +52,28 @@ internal class MarkdownImageRendererTest {
         assertTrue(images.all { it.hasPngHeader() })
     }
 
+    @Test
+    fun imageHeightGrowsWithContent(): Unit {
+        val shortImages = MarkdownImageRenderer.render("只有一行短内容。")
+        val longImages = MarkdownImageRenderer.render(
+            (1..40).joinToString("\n\n") { "第 $it 段较长的中文内容，用于验证图片高度随内容增加而增大。" }
+        )
+
+        val shortHeight = shortImages.single().pngHeight()
+        val longHeight = longImages.single().pngHeight()
+
+        // 短内容不应生成固定的大图，应显著小于长内容
+        assertTrue(longHeight > shortHeight * 3, "expected long=$longHeight to be much taller than short=$shortHeight")
+    }
+
     private fun ByteArray.hasPngHeader(): Boolean {
         val header = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
         return size > header.size && take(header.size).toByteArray().contentEquals(header)
+    }
+
+    private fun ByteArray.pngHeight(): Int {
+        return ByteArrayInputStream(this).use { input ->
+            ImageIO.read(input).height
+        }
     }
 }
