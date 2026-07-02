@@ -44,6 +44,9 @@ dependencies {
     implementation("io.ktor:ktor-serialization-kotlinx-json")
 
     implementation("org.yaml:snakeyaml:2.2")
+    implementation("com.vladsch.flexmark:flexmark-all:0.64.8")
+    implementation("com.openhtmltopdf:openhtmltopdf-java2d:1.0.10")
+    implementation("org.jsoup:jsoup:1.22.2")
 }
 
 kotlin {

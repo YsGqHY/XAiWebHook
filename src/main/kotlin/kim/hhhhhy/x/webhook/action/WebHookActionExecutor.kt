@@ -198,19 +198,19 @@ internal object WebHookActionExecutor {
         segments.forEach { segment ->
             when (segment) {
                 is IncomingMessageSegment.Text -> if (segment.value.isNotEmpty()) builder.append(PlainText(segment.value))
-                is IncomingMessageSegment.MarkdownImage -> builder.append(uploadMarkdownImage(segment.markdown, contact))
+                is IncomingMessageSegment.MarkdownImage -> uploadMarkdownImages(segment.markdown, contact).forEach { image ->
+                    builder.append(image)
+                }
             }
         }
         return builder.build()
     }
 
-    private suspend fun uploadMarkdownImage(markdown: String, contact: Contact): Message {
-        val bytes = MarkdownImageRenderer.render(markdown)
-        val resource = bytes.toExternalResource("png")
-        return try {
-            contact.uploadImage(resource)
-        } finally {
-            resource.close()
+    private suspend fun uploadMarkdownImages(markdown: String, contact: Contact): List<Message> {
+        return MarkdownImageRenderer.render(markdown).map { bytes ->
+            bytes.toExternalResource("png").use { resource ->
+                contact.uploadImage(resource)
+            }
         }
     }
 
