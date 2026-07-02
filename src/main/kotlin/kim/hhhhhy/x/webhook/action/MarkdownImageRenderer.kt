@@ -15,7 +15,7 @@ import javax.imageio.ImageIO
 
 internal object MarkdownImageRenderer {
     private const val WIDTH = 900
-    private const val HEIGHT = 1600
+    private const val MIN_HEIGHT = 120
     private const val SCALE = 2.0
     private const val BASE_URI = "https://xai-webhook.local/"
 
@@ -33,7 +33,7 @@ internal object MarkdownImageRenderer {
         Java2DRendererBuilder()
             .withHtmlContent(xhtml, BASE_URI)
             .useEnvironmentFonts(true)
-            .toPageProcessor(pageProcessor)
+            .toSinglePage(pageProcessor)
             .runPaged()
 
         return pageProcessor.pageImages.map { image ->
@@ -72,7 +72,7 @@ internal object MarkdownImageRenderer {
     private fun styleSheet(): String {
         return """
             @page {
-              size: ${WIDTH}px ${HEIGHT}px;
+              size: ${WIDTH}px;
               margin: 0;
             }
             * {
@@ -80,6 +80,7 @@ internal object MarkdownImageRenderer {
             }
             body {
               margin: 0;
+              min-height: ${MIN_HEIGHT}px;
               padding: 36px;
               background: #ffffff;
               color: #1f2328;
