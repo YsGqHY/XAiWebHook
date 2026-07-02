@@ -37,11 +37,25 @@ internal object MarkdownImageRenderer {
             .runPaged()
 
         return pageProcessor.pageImages.map { image ->
+            val flattened = flattenOntoWhite(image)
             ByteArrayOutputStream().use { output ->
-                ImageIO.write(image, "png", output)
+                ImageIO.write(flattened, "png", output)
                 output.toByteArray()
             }
         }
+    }
+
+    private fun flattenOntoWhite(source: BufferedImage): BufferedImage {
+        val target = BufferedImage(source.width, source.height, BufferedImage.TYPE_INT_RGB)
+        val graphics = target.createGraphics()
+        try {
+            graphics.color = java.awt.Color.WHITE
+            graphics.fillRect(0, 0, target.width, target.height)
+            graphics.drawImage(source, 0, 0, null)
+        } finally {
+            graphics.dispose()
+        }
+        return target
     }
 
     private fun toXhtmlDocument(bodyHtml: String): String {
