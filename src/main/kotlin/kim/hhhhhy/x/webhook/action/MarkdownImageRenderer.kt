@@ -14,7 +14,7 @@ import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
 
 internal object MarkdownImageRenderer {
-    private const val WIDTH = 900
+    private const val WIDTH = 2000
     private const val MIN_HEIGHT = 120
     private const val SCALE = 2.0
     private const val BASE_URI = "https://xai-webhook.local/"
