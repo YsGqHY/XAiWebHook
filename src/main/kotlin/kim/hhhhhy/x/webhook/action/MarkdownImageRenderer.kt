@@ -2,6 +2,7 @@ package kim.hhhhhy.x.webhook.action
 
 import com.openhtmltopdf.java2d.api.BufferedImagePageProcessor
 import com.openhtmltopdf.java2d.api.Java2DRendererBuilder
+import com.openhtmltopdf.util.XRLog
 import com.vladsch.flexmark.ext.tables.TablesExtension
 import com.vladsch.flexmark.ext.gfm.tasklist.TaskListExtension
 import com.vladsch.flexmark.html.HtmlRenderer
@@ -11,6 +12,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
+import java.util.logging.Level
 import javax.imageio.ImageIO
 
 internal object MarkdownImageRenderer {
@@ -18,6 +20,10 @@ internal object MarkdownImageRenderer {
     private const val MIN_HEIGHT = 120
     private const val SCALE = 2.0
     private const val BASE_URI = "https://xai-webhook.local/"
+
+    init {
+        XRLog.listRegisteredLoggers().forEach { logger -> XRLog.setLevel(logger, Level.WARNING) }
+    }
 
     private val options = MutableDataSet().apply {
         set(Parser.EXTENSIONS, listOf(TablesExtension.create(), TaskListExtension.create()))
@@ -87,8 +93,7 @@ internal object MarkdownImageRenderer {
               font-family: "Microsoft YaHei", "Noto Sans CJK SC", "SimSun", sans-serif;
               font-size: 24px;
               line-height: 1.65;
-              overflow-wrap: break-word;
-              word-break: break-word;
+              word-wrap: break-word;
             }
             .markdown-body {
               width: 100%;
@@ -158,7 +163,7 @@ internal object MarkdownImageRenderer {
               padding: 18px 20px;
               border-radius: 12px;
               background: #f6f8fa;
-              overflow-wrap: break-word;
+              word-wrap: break-word;
               white-space: pre-wrap;
             }
             pre code {
