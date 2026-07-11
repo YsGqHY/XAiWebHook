@@ -8,6 +8,7 @@ internal object WebHookConfig {
     private const val MAX_OUTGOING_COOLDOWN_MILLIS = 604_800_000L
     private const val DEFAULT_OUTGOING_COOLDOWN_MESSAGE =
         "指令冷却中，请在 \${cooldown.remainingSeconds} 秒后重试。"
+    private const val DEFAULT_SINGLE_FLIGHT_MESSAGE = "上一项任务尚未完成，请等待完成后再试。"
 
     private val configFile: File by lazy {
         File(XAiWebHook.configFolder, "webhook_config.yml")
@@ -123,6 +124,8 @@ internal object WebHookConfig {
                 timeoutMillis = browserMap.long("timeout_ms", 30_000L).coerceIn(1_000L, 300_000L),
                 optionalStepTimeoutMillis = browserMap.long("optional_step_timeout_ms", 1_000L)
                     .coerceIn(100L, 30_000L),
+                sessionCacheEnabled = browserMap.boolean("session_cache_enabled", false),
+                sessionCacheDirectory = browserMap.string("session_cache_dir", "browser-session-cache"),
                 allowedHosts = browserMap.stringList("allowed_hosts")
                     .map { it.lowercase().trimEnd('.') }
                     .filter { it.isNotBlank() }
@@ -135,6 +138,7 @@ internal object WebHookConfig {
   enabled       : ${browser.enabled}
   engine        : ${browser.engine}
   channel       : ${browser.channel ?: "(默认)"}
+  sessionCache  : ${if (browser.sessionCacheEnabled) browser.sessionCacheDirectory else "disabled"}
   allowedHosts  : ${browser.allowedHosts.size} 个""")
 
         val security = root.map("security").let { securityMap ->
@@ -191,7 +195,8 @@ internal object WebHookConfig {
             method = map.string("method", "POST").uppercase(),
             path = normalizePath(map.string("path", "/$id")),
             tokens = map.stringList("tokens"),
-            actions = parseActionList(map.list("actions"), globalActions)
+            actions = parseActionList(map.list("actions"), globalActions),
+            singleFlight = parseActionGroupSingleFlight(map.map("single_flight"))
         )
     }
 
@@ -209,7 +214,24 @@ internal object WebHookConfig {
             message = parseMessageMatcher(map.map("message")),
             condition = map.stringOrNull("condition"),
             cooldown = parseOutgoingCooldown(map.map("cooldown")),
-            actions = parseActionList(map.list("actions"), globalActions)
+            actions = parseActionList(map.list("actions"), globalActions),
+            singleFlight = parseActionGroupSingleFlight(map.map("single_flight"))
+        )
+    }
+
+    private fun parseActionGroupSingleFlight(map: Map<String, Any?>): ActionGroupSingleFlightConfig {
+        if (map.isEmpty()) return ActionGroupSingleFlightConfig.disabled()
+        val key = map.stringOrNull("key")?.also { value ->
+            require(value.length <= 200) { "single_flight.key must contain at most 200 characters" }
+            require(!value.contains('\r') && !value.contains('\n')) {
+                "single_flight.key must not contain line breaks"
+            }
+        }
+        return ActionGroupSingleFlightConfig(
+            enabled = map.boolean("enabled", true),
+            key = key,
+            notify = map.boolean("notify", true),
+            message = map["message"]?.toString() ?: DEFAULT_SINGLE_FLIGHT_MESSAGE
         )
     }
 
@@ -333,6 +355,8 @@ internal data class BrowserConfig(
     val viewportHeight: Int,
     val timeoutMillis: Long,
     val optionalStepTimeoutMillis: Long,
+    val sessionCacheEnabled: Boolean,
+    val sessionCacheDirectory: String,
     val allowedHosts: List<String>,
     val maxScreenshotBytes: Long
 ) {
@@ -347,6 +371,8 @@ internal data class BrowserConfig(
             viewportHeight = 1000,
             timeoutMillis = 30_000L,
             optionalStepTimeoutMillis = 1_000L,
+            sessionCacheEnabled = false,
+            sessionCacheDirectory = "browser-session-cache",
             allowedHosts = emptyList(),
             maxScreenshotBytes = 10_485_760L
         )
@@ -363,7 +389,8 @@ internal data class IncomingEndpoint(
     val method: String,
     val path: String,
     val tokens: List<String>,
-    val actions: List<ActionConfig>
+    val actions: List<ActionConfig>,
+    val singleFlight: ActionGroupSingleFlightConfig = ActionGroupSingleFlightConfig.disabled()
 )
 
 internal data class OutgoingConfig(
@@ -380,8 +407,25 @@ internal data class OutgoingRoute(
     val message: MessageMatcher,
     val condition: String?,
     val cooldown: OutgoingCooldownConfig,
-    val actions: List<ActionConfig>
+    val actions: List<ActionConfig>,
+    val singleFlight: ActionGroupSingleFlightConfig = ActionGroupSingleFlightConfig.disabled()
 )
+
+internal data class ActionGroupSingleFlightConfig(
+    val enabled: Boolean,
+    val key: String?,
+    val notify: Boolean,
+    val message: String
+) {
+    companion object {
+        fun disabled(): ActionGroupSingleFlightConfig = ActionGroupSingleFlightConfig(
+            enabled = false,
+            key = null,
+            notify = false,
+            message = "上一项任务尚未完成，请等待完成后再试。"
+        )
+    }
+}
 
 internal data class OutgoingCooldownConfig(
     val enabled: Boolean,

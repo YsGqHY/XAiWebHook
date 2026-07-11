@@ -1,6 +1,8 @@
 package kim.hhhhhy.x.webhook.listener
 
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.action.ActionGroupExecutionCoordinator
+import kim.hhhhhy.x.webhook.action.ActionGroupSingleFlightRegistry
 import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.OutgoingRoute
@@ -10,6 +12,7 @@ import kim.hhhhhy.x.webhook.model.CooldownContext
 import kim.hhhhhy.x.webhook.model.EventContext
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.TemplateEngine
+import java.util.concurrent.CancellationException
 
 internal data class OutgoingActor(
     val administrator: Boolean,
@@ -128,6 +131,7 @@ internal class OutgoingCooldownTracker(
 
 internal class OutgoingRouteProcessor(
     clockMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val singleFlights: ActionGroupSingleFlightRegistry = ActionGroupExecutionCoordinator.singleFlight,
     private val actionExecutor: suspend (List<ActionConfig>, ExecutionContext) -> Unit = { actions, context ->
         WebHookActionExecutor.execute(actions, context)
         Unit
@@ -156,20 +160,57 @@ internal class OutgoingRouteProcessor(
         }
 
         matched.forEach { route ->
-            when (val decision = cooldowns.acquire(route, event, actor)) {
-                OutgoingCooldownDecision.Allowed -> executeRoute(route, config, event, executionContext)
-                is OutgoingCooldownDecision.Blocked -> notifyCooldown(
-                    route = route,
-                    event = event,
-                    executionContext = executionContext,
-                    decision = decision,
-                    sendFeedback = sendFeedback
-                )
-            }
+            processRoute(
+                route = route,
+                config = config,
+                event = event,
+                actor = actor,
+                executionContext = executionContext,
+                sendFeedback = sendFeedback
+            )
         }
     }
 
     fun clearCooldowns(): Unit = cooldowns.clear()
+
+    private suspend fun processRoute(
+        route: OutgoingRoute,
+        config: PluginConfig,
+        event: EventContext,
+        actor: OutgoingActor,
+        executionContext: ExecutionContext,
+        sendFeedback: suspend (String) -> Unit
+    ): Unit {
+        val lease = singleFlights.tryAcquire(route.singleFlight, "outgoing:${route.id}")
+        if (lease == null) {
+            notifySingleFlight(route, executionContext, sendFeedback)
+            return
+        }
+
+        val cooldownDecision = try {
+            cooldowns.acquire(route, event, actor)
+        } catch (error: Throwable) {
+            lease.close()
+            throw error
+        }
+        if (cooldownDecision is OutgoingCooldownDecision.Blocked) {
+            lease.close()
+            notifyCooldown(
+                route = route,
+                event = event,
+                executionContext = executionContext,
+                decision = cooldownDecision,
+                sendFeedback = sendFeedback
+            )
+            return
+        }
+
+        try {
+            executeRoute(route, config, event, executionContext)
+        } finally {
+            lease.close()
+        }
+    }
 
     private suspend fun executeRoute(
         route: OutgoingRoute,
@@ -184,9 +225,33 @@ internal class OutgoingRouteProcessor(
             """[XAiWebHook] [事件] 路由 ${route.id} 已匹配
   动作数   : ${route.actions.size}"""
         )
-        runCatching { actionExecutor(route.actions, executionContext) }
+        try {
+            actionExecutor(route.actions, executionContext)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            XAiWebHook.logger.error("Outgoing route execution failed route=${route.id}", error)
+        }
+    }
+
+    private suspend fun notifySingleFlight(
+        route: OutgoingRoute,
+        executionContext: ExecutionContext,
+        sendFeedback: suspend (String) -> Unit
+    ): Unit {
+        WebHookDebug.log(
+            "[XAiWebHook] [单飞] 路由 ${route.id} 的上一轮动作尚未完成，已阻止重复触发 " +
+                "key=${route.singleFlight.key ?: "(route)"}"
+        )
+        if (!route.singleFlight.notify) return
+
+        val message = TemplateEngine.renderString(route.singleFlight.message, executionContext).trim()
+        if (message.isEmpty()) return
+        runCatching { sendFeedback(message) }
             .onFailure { error ->
-                XAiWebHook.logger.error("Outgoing route execution failed route=${route.id}", error)
+                XAiWebHook.logger.warning(
+                    "Failed to send outgoing single-flight message route=${route.id}: ${error.message}"
+                )
             }
     }
 
@@ -230,13 +295,20 @@ internal class OutgoingRouteProcessor(
         if (groups.isNotEmpty() && (event.groupId == null || event.groupId !in groups)) return false
         if (friends.isNotEmpty() && (event.friendId == null || event.friendId !in friends)) return false
         if (senders.isNotEmpty() && event.senderId !in senders) return false
-        if (message.contains.isNotEmpty() && message.contains.none { event.messageText.contains(it) }) return false
-        if (message.startsWith.isNotEmpty() && message.startsWith.none { event.messageText.startsWith(it) }) return false
-        if (message.endsWith.isNotEmpty() && message.endsWith.none { event.messageText.endsWith(it) }) return false
-        if (message.regex.isNotEmpty() && message.regex.none { pattern ->
-                runCatching { pattern.containsMatchIn(event.messageText) }.getOrDefault(false)
-            }
-        ) return false
+
+        val hasMessageMatcher = message.contains.isNotEmpty() ||
+            message.startsWith.isNotEmpty() ||
+            message.endsWith.isNotEmpty() ||
+            message.regex.isNotEmpty()
+        if (hasMessageMatcher) {
+            val messageMatches = message.contains.any { event.messageText.contains(it) } ||
+                message.startsWith.any { event.messageText.startsWith(it) } ||
+                message.endsWith.any { event.messageText.endsWith(it) } ||
+                message.regex.any { pattern ->
+                    runCatching { pattern.containsMatchIn(event.messageText) }.getOrDefault(false)
+                }
+            if (!messageMatches) return false
+        }
         return TemplateEngine.evaluateCondition(condition, context)
     }
 }

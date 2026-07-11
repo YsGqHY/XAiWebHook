@@ -7,16 +7,22 @@ import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Locator
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
+import com.microsoft.playwright.PlaywrightException
 import com.microsoft.playwright.Route
 import com.microsoft.playwright.TimeoutError
 import com.microsoft.playwright.options.Cookie
 import com.microsoft.playwright.options.RequestOptions
 import com.microsoft.playwright.options.WaitForSelectorState
 import com.microsoft.playwright.options.WaitUntilState
+import kim.hhhhhy.x.webhook.XAiWebHook
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
+import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.TemplateEngine
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -34,12 +40,21 @@ import java.nio.file.Paths
 import java.time.Instant
 import java.util.Base64
 import java.util.Locale
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 internal object WebPageScreenshotAction {
     private const val MAX_STEPS = 32
+    private const val DEFAULT_SCREENSHOT_FONT_WAIT_TIMEOUT_MILLIS = 3_000L
+    private const val MAX_SCREENSHOT_HIDE_SELECTORS = 32
+    private const val MAX_SCREENSHOT_HIDE_SELECTOR_LENGTH = 500
+    private const val DEFAULT_SCREENSHOT_MAX_RETRIES = 2
+    private const val MAX_SCREENSHOT_RETRIES = 10
+    private const val DEFAULT_SCREENSHOT_RETRY_DELAY_MILLIS = 1_000L
+    private const val MAX_SCREENSHOT_RETRY_DELAY_MILLIS = 60_000L
+    private const val PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT = "PW_TEST_SCREENSHOT_NO_FONTS_READY"
     private val NAVIGATION_WAIT_UNTIL = setOf("commit", "domcontentloaded", "load", "networkidle")
     private val workerLock = Any()
 
@@ -58,13 +73,43 @@ internal object WebPageScreenshotAction {
         val browserConfig = context.config.browser
         check(browserConfig.enabled) { "browser actions are disabled" }
         val spec = parseSpec(action, context)
-        return runCatching {
-            worker().capture(browserConfig, spec, environment)
-        }.onSuccess {
-            lastError = null
-        }.onFailure { error ->
-            lastError = error.message?.take(500) ?: error::class.simpleName
-        }.getOrThrow()
+        var retriesUsed = 0
+        while (true) {
+            try {
+                return worker().capture(browserConfig, spec, environment).also {
+                    lastError = null
+                }
+            } catch (error: Throwable) {
+                currentCoroutineContext().ensureActive()
+                val retry = spec.retry
+                val shouldRetry = retry.enabled &&
+                    retriesUsed < retry.maxRetries &&
+                    isRetryableCaptureError(error)
+                if (!shouldRetry) {
+                    lastError = error.message?.take(500) ?: error::class.simpleName
+                    throw error
+                }
+
+                val failedAttempt = retriesUsed + 1
+                retriesUsed++
+                val totalAttempts = retry.maxRetries + 1
+                val detail = summarizeRetryError(error)
+                lastError = "attempt $failedAttempt/$totalAttempts failed; retrying: $detail".take(500)
+                runCatching {
+                    XAiWebHook.logger.warning(
+                        "Webpage screenshot attempt $failedAttempt/$totalAttempts failed; " +
+                            "retrying in ${retry.delayMillis}ms: $detail"
+                    )
+                }
+                WebHookDebug.log(
+                    "[XAiWebHook] [截图重试] 第 $failedAttempt/$totalAttempts 次尝试失败，" +
+                        "${retry.delayMillis}ms 后重试：$detail"
+                )
+                if (retry.delayMillis > 0L) {
+                    delay(retry.delayMillis)
+                }
+            }
+        }
     }
 
     fun reset(): Unit {
@@ -76,6 +121,11 @@ internal object WebPageScreenshotAction {
     }
 
     fun close(): Unit = reset()
+
+    internal fun playwrightDriverEnvironment(): Map<String, String> = mapOf(
+        "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" to "1",
+        PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT to "1"
+    )
 
     internal fun parseSpec(action: ActionConfig, context: ExecutionContext): WebPageScreenshotSpec {
         val rawSteps = action.params["steps"] as? List<*>
@@ -97,6 +147,35 @@ internal object WebPageScreenshotAction {
             context,
             context.config.browser.timeoutMillis
         ).coerceIn(100L, 300_000L)
+        val screenshotFontWaitTimeoutMillis = renderLong(
+            screenshotMap["font_wait_timeout_ms"],
+            context,
+            minOf(DEFAULT_SCREENSHOT_FONT_WAIT_TIMEOUT_MILLIS, screenshotTimeoutMillis)
+        ).coerceIn(0L, screenshotTimeoutMillis)
+        val screenshotHideSelectors = renderStringList(screenshotMap["hide_selectors"], context)
+            .map(::normalizeScreenshotHideSelector)
+            .distinct()
+        require(screenshotHideSelectors.size <= MAX_SCREENSHOT_HIDE_SELECTORS) {
+            "screenshot.hide_selectors must contain at most $MAX_SCREENSHOT_HIDE_SELECTORS entries"
+        }
+        val retryMap = screenshotMap["retry"].asParameterMap()
+        val screenshotRetry = if (retryMap.isEmpty()) {
+            BrowserScreenshotRetry.disabled()
+        } else {
+            BrowserScreenshotRetry(
+                enabled = renderBoolean(retryMap["enabled"], context, true),
+                maxRetries = renderLong(
+                    retryMap["max_retries"],
+                    context,
+                    DEFAULT_SCREENSHOT_MAX_RETRIES.toLong()
+                ).coerceIn(0L, MAX_SCREENSHOT_RETRIES.toLong()).toInt(),
+                delayMillis = renderLong(
+                    retryMap["delay_ms"],
+                    context,
+                    DEFAULT_SCREENSHOT_RETRY_DELAY_MILLIS
+                ).coerceIn(0L, MAX_SCREENSHOT_RETRY_DELAY_MILLIS)
+            )
+        }
         val sessionKey = renderOptionalString(action.params["session_key"], context)
             ?: action.id?.trim()?.ifBlank { null }
         val auth = parseAuth(action.params["auth"].asParameterMap(), context)
@@ -111,7 +190,10 @@ internal object WebPageScreenshotAction {
             auth = auth,
             steps = steps,
             screenshotSelector = screenshotSelector,
-            screenshotTimeoutMillis = screenshotTimeoutMillis
+            screenshotTimeoutMillis = screenshotTimeoutMillis,
+            screenshotFontWaitTimeoutMillis = screenshotFontWaitTimeoutMillis,
+            screenshotHideSelectors = screenshotHideSelectors,
+            retry = screenshotRetry
         )
     }
 
@@ -141,6 +223,88 @@ internal object WebPageScreenshotAction {
         } else {
             normalized
         }
+    }
+
+    internal fun normalizeScreenshotHideSelector(selector: String): String {
+        val normalized = selector.trim()
+        require(normalized.isNotEmpty()) { "screenshot.hide_selectors entries must not be blank" }
+        require(normalized.length <= MAX_SCREENSHOT_HIDE_SELECTOR_LENGTH) {
+            "screenshot.hide_selectors entries must be at most $MAX_SCREENSHOT_HIDE_SELECTOR_LENGTH characters"
+        }
+        require(normalized.none { it in "{};\r\n\u0000" } && "/*" !in normalized && "*/" !in normalized) {
+            "screenshot.hide_selectors contains unsafe CSS syntax"
+        }
+        return normalized
+    }
+
+    internal fun buildScreenshotStyle(hideSelectors: List<String>): String? {
+        return hideSelectors.takeIf { it.isNotEmpty() }
+            ?.joinToString("\n") { selector -> "$selector { visibility: hidden !important; }" }
+    }
+
+    internal fun isRetryableCaptureError(error: Throwable): Boolean {
+        val chain = throwableChain(error)
+        val operationIndex = chain.indexOfFirst { item ->
+            val message = item.message.orEmpty()
+            message.startsWith("browser step ") || message.startsWith("browser screenshot ")
+        }
+        if (operationIndex < 0) return false
+
+        val operationCauses = chain.drop(operationIndex + 1).dropWhile { item ->
+            val message = item.message.orEmpty()
+            message.startsWith("browser step ") || message.startsWith("browser screenshot ")
+        }
+        if (operationCauses.any {
+                it is IllegalArgumentException ||
+                    (it is IllegalStateException && it !is CancellationException) ||
+                    it is IllegalAccessException
+            }
+        ) {
+            return false
+        }
+        if (operationCauses.any { it is TimeoutError || it is CancellationException }) return true
+        if (operationCauses.none { it is PlaywrightException }) return false
+
+        val combinedMessage = operationCauses
+            .joinToString(" ") { it.message.orEmpty() }
+            .lowercase(Locale.ROOT)
+        return listOf(
+            "net::err_",
+            "econnreset",
+            "etimedout",
+            "connection reset",
+            "connection refused",
+            "connection closed",
+            "socket hang up",
+            "target closed",
+            "has been closed",
+            "page closed",
+            "browser closed",
+            "context closed",
+            "frame was detached",
+            "execution context was destroyed",
+            "cancelled",
+            "canceled",
+            "crash"
+        ).any { marker -> marker in combinedMessage }
+    }
+
+    private fun summarizeRetryError(error: Throwable): String {
+        return (error.message ?: error::class.simpleName ?: "unknown error")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(300)
+    }
+
+    private fun throwableChain(error: Throwable): List<Throwable> {
+        val chain = mutableListOf<Throwable>()
+        val seen = mutableSetOf<Throwable>()
+        var current: Throwable? = error
+        while (current != null && chain.size < 16 && seen.add(current)) {
+            chain += current
+            current = current.cause
+        }
+        return chain
     }
 
     internal fun resolveFillValue(step: BrowserStep, environment: Map<String, String>): String {
@@ -207,12 +371,7 @@ internal object WebPageScreenshotAction {
             put("cookies", buildJsonArray {})
             put("origins", buildJsonArray {
                 if (localStorage != null) {
-                    val entries = linkedMapOf<String, String>().apply {
-                        auth.token?.let { token ->
-                            put(localStorage.key, localStorage.prefix + token)
-                        }
-                        putAll(auth.additionalLocalStorage)
-                    }
+                    val entries = authStorageEntries(auth)
                     add(buildJsonObject {
                         put("origin", localStorage.origin)
                         put("localStorage", buildJsonArray {
@@ -227,6 +386,133 @@ internal object WebPageScreenshotAction {
                 }
             })
         }.toString()
+    }
+
+    internal fun mergeStorageState(storageState: String, auth: ResolvedBrowserAuth): String {
+        val root = runCatching { Json.parseToJsonElement(storageState) as? JsonObject }
+            .getOrNull()
+            ?: error("browser storage state is not valid JSON")
+        val localStorage = auth.spec.localStorage ?: return root.toString()
+        val entries = authStorageEntries(auth)
+        if (entries.isEmpty()) return root.toString()
+
+        val origins = root["origins"] as? JsonArray ?: buildJsonArray {}
+        var merged = false
+        val updatedOrigins = buildJsonArray {
+            origins.forEach { element ->
+                val origin = element as? JsonObject
+                val originValue = (origin?.get("origin") as? JsonPrimitive)?.contentOrNull
+                if (origin != null && originValue == localStorage.origin) {
+                    merged = true
+                    add(mergeOriginLocalStorage(origin, entries))
+                } else {
+                    add(element)
+                }
+            }
+            if (!merged) {
+                add(buildOriginStorage(localStorage.origin, entries))
+            }
+        }
+        return JsonObject(root + ("origins" to updatedOrigins)).toString()
+    }
+
+    internal fun readStorageStateLocalStorage(storageState: String, origin: String): Map<String, String> {
+        val root = runCatching { Json.parseToJsonElement(storageState) as? JsonObject }
+            .getOrNull()
+            ?: return emptyMap()
+        val origins = root["origins"] as? JsonArray ?: return emptyMap()
+        val matchingOrigin = origins.mapNotNull { it as? JsonObject }.firstOrNull { item ->
+            (item["origin"] as? JsonPrimitive)?.contentOrNull == origin
+        } ?: return emptyMap()
+        val entries = matchingOrigin["localStorage"] as? JsonArray ?: return emptyMap()
+        return entries.mapNotNull { entry ->
+            val item = entry as? JsonObject ?: return@mapNotNull null
+            val name = (item["name"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            val value = (item["value"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            name to value
+        }.toMap()
+    }
+
+    internal fun restoreCachedSessionAuth(
+        auth: ResolvedBrowserAuth,
+        cached: CachedBrowserSession
+    ): ResolvedBrowserAuth? {
+        if (auth.spec.login == null && auth.spec.cliBridge == null) return null
+        val localStorage = auth.spec.localStorage ?: return null
+        val values = readStorageStateLocalStorage(cached.storageState, localStorage.origin)
+        val accessToken = values[localStorage.key]?.trim()?.ifBlank { null } ?: return null
+        val refreshToken = values[localStorage.refreshTokenKey]?.trim()?.ifBlank { null }
+        val expiresAtMillis = values[localStorage.expiresAtKey]?.toLongOrNull() ?: return null
+        val user = values[localStorage.userKey]?.let { raw ->
+            runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+        } ?: return null
+        return withTokenPair(
+            auth,
+            BrowserTokenPair(
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                expiresAtMillis = expiresAtMillis,
+                tokenType = cached.tokenType,
+                user = user
+            )
+        )
+    }
+
+    internal fun withTokenPair(auth: ResolvedBrowserAuth, tokenPair: BrowserTokenPair): ResolvedBrowserAuth {
+        val localStorage = auth.spec.localStorage
+            ?: error("session auth requires auth.local_storage")
+        val storage = linkedMapOf<String, String>()
+        tokenPair.refreshToken?.let { storage[localStorage.refreshTokenKey] = it }
+        tokenPair.expiresAtMillis?.let { storage[localStorage.expiresAtKey] = it.toString() }
+        storage[localStorage.userKey] = tokenPair.user.toString()
+        return auth.copy(
+            token = tokenPair.accessToken,
+            tokenPair = tokenPair,
+            additionalLocalStorage = storage
+        )
+    }
+
+    private fun authStorageEntries(auth: ResolvedBrowserAuth): LinkedHashMap<String, String> {
+        val localStorage = auth.spec.localStorage ?: return linkedMapOf()
+        return linkedMapOf<String, String>().apply {
+            auth.token?.let { token ->
+                put(localStorage.key, localStorage.prefix + token)
+            }
+            putAll(auth.additionalLocalStorage)
+        }
+    }
+
+    private fun mergeOriginLocalStorage(
+        origin: JsonObject,
+        updates: Map<String, String>
+    ): JsonObject {
+        val entries = linkedMapOf<String, String>()
+        (origin["localStorage"] as? JsonArray).orEmpty().forEach { element ->
+            val item = element as? JsonObject ?: return@forEach
+            val name = (item["name"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
+            val value = (item["value"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
+            entries[name] = value
+        }
+        entries.putAll(updates)
+        return JsonObject(origin + ("localStorage" to buildLocalStorageArray(entries)))
+    }
+
+    private fun buildOriginStorage(origin: String, entries: Map<String, String>): JsonObject {
+        return buildJsonObject {
+            put("origin", origin)
+            put("localStorage", buildLocalStorageArray(entries))
+        }
+    }
+
+    private fun buildLocalStorageArray(entries: Map<String, String>): JsonArray {
+        return buildJsonArray {
+            entries.forEach { (name, value) ->
+                add(buildJsonObject {
+                    put("name", name)
+                    put("value", value)
+                })
+            }
+        }
     }
 
     internal fun extractBootstrapStorageValue(responseBody: String, responsePath: List<String>): String {
@@ -707,7 +993,7 @@ internal object WebPageScreenshotAction {
             } else {
                 val existing = sessions[sessionKey]
                 if (existing != null && existing.matches(resolvedAuth)) {
-                    ensureSessionFresh(activeBrowser, config, sessionKey, existing)
+                    ensureSessionFresh(activeBrowser, config, sessionKey, existing, resolvedAuth)
                 } else {
                     existing?.close()
                     createSession(activeBrowser, config, resolvedAuth, sessionKey).also { created ->
@@ -727,9 +1013,13 @@ internal object WebPageScreenshotAction {
                                 .setState(WaitForSelectorState.VISIBLE)
                                 .setTimeout(spec.screenshotTimeoutMillis.toDouble())
                         )
-                        val bytes = target.screenshot(
-                            Locator.ScreenshotOptions().setTimeout(spec.screenshotTimeoutMillis.toDouble())
-                        )
+                        waitForFontsBestEffort(page, spec.screenshotFontWaitTimeoutMillis)
+                        val screenshotOptions = Locator.ScreenshotOptions()
+                            .setTimeout(spec.screenshotTimeoutMillis.toDouble())
+                        buildScreenshotStyle(spec.screenshotHideSelectors)?.let { style ->
+                            screenshotOptions.setStyle(style)
+                        }
+                        val bytes = target.screenshot(screenshotOptions)
                         validateScreenshotSize(bytes.size, config.maxScreenshotBytes)
                         bytes
                     } catch (error: Throwable) {
@@ -739,6 +1029,7 @@ internal object WebPageScreenshotAction {
                     runCatching { page.close() }
                     if (sessionKey != null) {
                         runCatching { syncTokenPairAuth(session) }
+                        persistSessionSafely(config, sessionKey, session)
                     }
                 }
             } catch (error: Throwable) {
@@ -753,6 +1044,22 @@ internal object WebPageScreenshotAction {
             }
         }
 
+        private fun waitForFontsBestEffort(page: Page, timeoutMillis: Long): Unit {
+            if (timeoutMillis <= 0L) return
+            try {
+                page.waitForFunction(
+                    "() => !document.fonts || document.fonts.status === 'loaded'",
+                    null,
+                    Page.WaitForFunctionOptions().setTimeout(timeoutMillis.toDouble())
+                ).dispose()
+            } catch (error: TimeoutError) {
+                WebHookDebug.log(
+                    "[XAiWebHook] [浏览器] 字体在 ${timeoutMillis}ms 内未完成加载，" +
+                        "将使用当前已渲染字体继续截图"
+                )
+            }
+        }
+
         private fun ensureBrowser(config: BrowserConfig): Browser {
             if (activeConfig != null && activeConfig != config) {
                 closeOnWorker()
@@ -760,7 +1067,7 @@ internal object WebPageScreenshotAction {
             browser?.let { return it }
 
             val createdPlaywright = Playwright.create(
-                Playwright.CreateOptions().setEnv(mapOf("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" to "1"))
+                Playwright.CreateOptions().setEnv(playwrightDriverEnvironment())
             )
             val browserType = when (config.engine) {
                 "chromium" -> createdPlaywright.chromium()
@@ -797,16 +1104,61 @@ internal object WebPageScreenshotAction {
             auth: ResolvedBrowserAuth?,
             sessionKey: String?
         ): BrowserSession {
-            val preparedAuth = when {
-                auth?.credentials != null -> prepareCredentialAuth(config, auth, sessionKey)
-                auth?.spec?.cliBridge != null -> prepareCliBridgeAuth(config, auth, sessionKey)
-                auth != null -> bootstrapAuth(config, auth)
-                else -> null
+            val restored = if (sessionKey != null) {
+                restoreSession(config, sessionKey, auth)
+            } else {
+                null
+            }
+            val preparedAuth = if (restored != null) {
+                restored.auth
+            } else {
+                when {
+                    auth?.credentials != null -> prepareCredentialAuth(config, auth, sessionKey)
+                    auth?.spec?.cliBridge != null -> prepareCliBridgeAuth(config, auth, sessionKey)
+                    auth != null -> bootstrapAuth(config, auth)
+                    else -> null
+                }
             }
             return BrowserSession(
-                context = newContext(browser, config, preparedAuth),
+                context = newContext(browser, config, preparedAuth, restored?.storageState),
                 auth = preparedAuth
             )
+        }
+
+        private fun restoreSession(
+            config: BrowserConfig,
+            sessionKey: String,
+            auth: ResolvedBrowserAuth?
+        ): RestoredBrowserSession? {
+            val cache = try {
+                sessionCache(config)
+            } catch (error: Throwable) {
+                warnSessionCache("browser session cache directory is invalid; a new login will be used", error)
+                null
+            } ?: return null
+            val cached = try {
+                cache.load(sessionKey, auth)
+            } catch (error: Throwable) {
+                runCatching { cache.delete(sessionKey) }
+                warnSessionCache("cached browser session could not be read; a new login will be used", error)
+                null
+            } ?: return null
+            if (auth == null || (auth.spec.login == null && auth.spec.cliBridge == null)) {
+                return RestoredBrowserSession(auth, cached.storageState)
+            }
+            val restoredAuth = restoreCachedSessionAuth(auth, cached)
+            if (restoredAuth == null) {
+                runCatching { cache.delete(sessionKey) }
+                return null
+            }
+            val freshAuth = try {
+                refreshSessionAuthIfNeeded(config, restoredAuth)
+            } catch (error: Throwable) {
+                runCatching { cache.delete(sessionKey) }
+                warnSessionCache("cached browser session could not be refreshed; a new login will be used", error)
+                return null
+            }
+            return RestoredBrowserSession(freshAuth, cached.storageState)
         }
 
         private fun prepareCredentialAuth(
@@ -837,7 +1189,7 @@ internal object WebPageScreenshotAction {
                     timeoutMillis = config.timeoutMillis
                 )
                 authFailures.remove(key)
-                auth.withTokenPair(tokenPair)
+                withTokenPair(auth, tokenPair)
             } catch (error: Throwable) {
                 authFailures[key] = AuthFailure(
                     authFingerprint = authFingerprint,
@@ -891,7 +1243,7 @@ internal object WebPageScreenshotAction {
                 }
                 pendingCliTokens.remove(key)
                 authFailures.remove(key)
-                auth.withTokenPair(tokenPair)
+                withTokenPair(auth, tokenPair)
             } catch (error: Throwable) {
                 authFailures[key] = AuthFailure(
                     authFingerprint = authFingerprint,
@@ -906,68 +1258,77 @@ internal object WebPageScreenshotAction {
             browser: Browser,
             config: BrowserConfig,
             sessionKey: String,
-            session: BrowserSession
+            session: BrowserSession,
+            candidateAuth: ResolvedBrowserAuth?
         ): BrowserSession {
             val auth = session.auth ?: return session
-            val tokenPair = auth.tokenPair ?: return session
-            val expiresAtMillis = tokenPair.expiresAtMillis ?: return session
-            val refreshBeforeExpirySeconds = auth.spec.login?.refreshBeforeExpirySeconds
-                ?: auth.spec.cliBridge?.refreshBeforeExpirySeconds
-                ?: return session
-            val refreshAtMillis = expiresAtMillis - refreshBeforeExpirySeconds * 1_000L
-            if (System.currentTimeMillis() < refreshAtMillis) return session
-
             val refreshedAuth = try {
-                val refreshed = when {
-                    auth.spec.login != null -> {
-                        val activePlaywright = playwright ?: error("Playwright is not initialized")
-                        WebPageCredentialAuthClient.refresh(
-                            apiRequest = activePlaywright.request(),
-                            auth = auth,
-                            timeoutMillis = config.timeoutMillis
-                        )
-                    }
-                    auth.spec.cliBridge != null -> WebPageCliBridgeAuthClient.refresh(
-                        auth = auth,
-                        timeoutMillis = config.timeoutMillis
-                    )
-                    else -> return session
-                }
-                auth.withTokenPair(refreshed)
+                refreshSessionAuthIfNeeded(config, auth)
             } catch (error: Throwable) {
                 sessions.remove(sessionKey)
                 session.close()
-                throw error
+                deleteSessionCacheSafely(config, sessionKey)
+                warnSessionCache("browser session refresh failed; a new login will be used", error)
+                val replacement = createSession(browser, config, candidateAuth, sessionKey)
+                sessions[sessionKey] = replacement
+                return replacement
             }
-            val replacement = newContext(browser, config, refreshedAuth)
+            if (refreshedAuth == auth) return session
+
+            val storageState = runCatching { session.context.storageState() }.getOrNull()
+            val replacement = newContext(browser, config, refreshedAuth, storageState)
             runCatching { session.context.close() }
             session.context = replacement
             session.auth = refreshedAuth
+            persistSessionSafely(config, sessionKey, session)
             return session
         }
 
-        private fun ResolvedBrowserAuth.withTokenPair(tokenPair: BrowserTokenPair): ResolvedBrowserAuth {
-            val localStorage = spec.localStorage
-                ?: error("session auth requires auth.local_storage")
-            val storage = linkedMapOf<String, String>()
-            tokenPair.refreshToken?.let { storage[localStorage.refreshTokenKey] = it }
-            tokenPair.expiresAtMillis?.let { storage[localStorage.expiresAtKey] = it.toString() }
-            storage[localStorage.userKey] = tokenPair.user.toString()
-            return copy(
-                token = tokenPair.accessToken,
-                tokenPair = tokenPair,
-                additionalLocalStorage = storage
-            )
+        private fun refreshSessionAuthIfNeeded(
+            config: BrowserConfig,
+            auth: ResolvedBrowserAuth
+        ): ResolvedBrowserAuth {
+            val tokenPair = auth.tokenPair ?: return auth
+            val expiresAtMillis = tokenPair.expiresAtMillis ?: return auth
+            val refreshBeforeExpirySeconds = auth.spec.login?.refreshBeforeExpirySeconds
+                ?: auth.spec.cliBridge?.refreshBeforeExpirySeconds
+                ?: return auth
+            val refreshAtMillis = expiresAtMillis - refreshBeforeExpirySeconds * 1_000L
+            if (System.currentTimeMillis() < refreshAtMillis) return auth
+
+            val refreshed = when {
+                auth.spec.login != null -> {
+                    val activePlaywright = playwright ?: error("Playwright is not initialized")
+                    WebPageCredentialAuthClient.refresh(
+                        apiRequest = activePlaywright.request(),
+                        auth = auth,
+                        timeoutMillis = config.timeoutMillis
+                    )
+                }
+                auth.spec.cliBridge != null -> WebPageCliBridgeAuthClient.refresh(
+                    auth = auth,
+                    timeoutMillis = config.timeoutMillis
+                )
+                else -> return auth
+            }
+            return withTokenPair(auth, refreshed)
         }
 
         private fun newContext(
             browser: Browser,
             config: BrowserConfig,
-            auth: ResolvedBrowserAuth?
+            auth: ResolvedBrowserAuth?,
+            storageState: String? = null
         ): BrowserContext {
             val options = Browser.NewContextOptions().setViewportSize(config.viewportWidth, config.viewportHeight)
-            if (auth?.spec?.localStorage != null) {
-                options.setStorageState(buildStorageState(auth))
+            val preparedStorageState = when {
+                storageState != null && auth != null -> mergeStorageState(storageState, auth)
+                storageState != null -> storageState
+                auth?.spec?.localStorage != null -> buildStorageState(auth)
+                else -> null
+            }
+            if (preparedStorageState != null) {
+                options.setStorageState(preparedStorageState)
             }
             return browser.newContext(options).also { context ->
                 context.setDefaultTimeout(config.timeoutMillis.toDouble())
@@ -1038,7 +1399,8 @@ internal object WebPageScreenshotAction {
             val user = values[localStorage.userKey]?.let { raw ->
                 runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
             } ?: previous.user
-            session.auth = auth.withTokenPair(
+            session.auth = withTokenPair(
+                auth,
                 BrowserTokenPair(
                     accessToken = accessToken,
                     refreshToken = refreshToken,
@@ -1050,20 +1412,52 @@ internal object WebPageScreenshotAction {
         }
 
         private fun readContextLocalStorage(context: BrowserContext, origin: String): Map<String, String> {
-            val root = runCatching {
-                Json.parseToJsonElement(context.storageState()) as? JsonObject
-            }.getOrNull() ?: return emptyMap()
-            val origins = root["origins"] as? JsonArray ?: return emptyMap()
-            val matchingOrigin = origins.mapNotNull { it as? JsonObject }.firstOrNull { item ->
-                (item["origin"] as? JsonPrimitive)?.contentOrNull == origin
-            } ?: return emptyMap()
-            val entries = matchingOrigin["localStorage"] as? JsonArray ?: return emptyMap()
-            return entries.mapNotNull { entry ->
-                val item = entry as? JsonObject ?: return@mapNotNull null
-                val name = (item["name"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
-                val value = (item["value"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
-                name to value
-            }.toMap()
+            return readStorageStateLocalStorage(context.storageState(), origin)
+        }
+
+        private fun sessionCache(config: BrowserConfig): BrowserSessionCache? {
+            if (!config.sessionCacheEnabled) return null
+            val configuredPath = Paths.get(config.sessionCacheDirectory.trim())
+            val directory = if (configuredPath.isAbsolute) {
+                configuredPath.normalize()
+            } else {
+                resolveBrowserSessionCacheDirectory(
+                    configured = config.sessionCacheDirectory,
+                    configFolder = XAiWebHook.configFolder.toPath()
+                )
+            }
+            return BrowserSessionCache(directory)
+        }
+
+        private fun persistSessionSafely(
+            config: BrowserConfig,
+            sessionKey: String,
+            session: BrowserSession
+        ): Unit {
+            val cache = try {
+                sessionCache(config)
+            } catch (error: Throwable) {
+                warnSessionCache("browser session cache directory is invalid", error)
+                return
+            } ?: return
+            try {
+                cache.save(sessionKey, session.auth, session.context.storageState())
+            } catch (error: Throwable) {
+                warnSessionCache("browser session cache could not be saved", error)
+            }
+        }
+
+        private fun deleteSessionCacheSafely(config: BrowserConfig, sessionKey: String): Unit {
+            try {
+                sessionCache(config)?.delete(sessionKey)
+            } catch (error: Throwable) {
+                warnSessionCache("browser session cache could not be deleted", error)
+            }
+        }
+
+        private fun warnSessionCache(message: String, error: Throwable): Unit {
+            val detail = summarizeError(error)
+            runCatching { XAiWebHook.logger.warning("$message ($detail)") }
         }
 
         private fun installAuth(context: BrowserContext, auth: ResolvedBrowserAuth): Unit {
@@ -1259,6 +1653,11 @@ internal object WebPageScreenshotAction {
             }
         }
 
+        private data class RestoredBrowserSession(
+            val auth: ResolvedBrowserAuth?,
+            val storageState: String
+        )
+
         private data class AuthFailure(
             val authFingerprint: Int,
             val retryAtMillis: Long,
@@ -1271,6 +1670,11 @@ internal object WebPageScreenshotAction {
         )
 
         private fun closeOnWorker(): Unit {
+            activeConfig?.let { config ->
+                sessions.forEach { (sessionKey, session) ->
+                    persistSessionSafely(config, sessionKey, session)
+                }
+            }
             sessions.values.forEach { session -> session.close() }
             sessions.clear()
             authFailures.clear()
@@ -1306,8 +1710,25 @@ internal data class WebPageScreenshotSpec(
     val auth: BrowserAuthSpec?,
     val steps: List<BrowserStep>,
     val screenshotSelector: String,
-    val screenshotTimeoutMillis: Long
+    val screenshotTimeoutMillis: Long,
+    val screenshotFontWaitTimeoutMillis: Long,
+    val screenshotHideSelectors: List<String>,
+    val retry: BrowserScreenshotRetry
 )
+
+internal data class BrowserScreenshotRetry(
+    val enabled: Boolean,
+    val maxRetries: Int,
+    val delayMillis: Long
+) {
+    companion object {
+        fun disabled(): BrowserScreenshotRetry = BrowserScreenshotRetry(
+            enabled = false,
+            maxRetries = 0,
+            delayMillis = 0L
+        )
+    }
+}
 
 internal data class BrowserAuthSpec(
     val token: String?,

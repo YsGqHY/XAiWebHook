@@ -23,6 +23,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.action.ActionGroupExecutionCoordinator
 import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
 import kim.hhhhhy.x.webhook.action.WebHookActionExecutor.toJsonElement
 import kim.hhhhhy.x.webhook.config.IncomingEndpoint
@@ -30,6 +31,7 @@ import kim.hhhhhy.x.webhook.config.PluginConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.model.RequestContext
+import kim.hhhhhy.x.webhook.template.TemplateEngine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -184,9 +186,22 @@ internal object WebHookServer {
         if (config.logging.request) {
             XAiWebHook.logger.info("Incoming webhook endpoint=${endpoint.id} path=${requestContext.path}")
         }
-        WebHookDebug.log("[XAiWebHook] [请求] 开始执行端点 ${endpoint.id} 的 ${endpoint.actions.size} 个动作...")
         val executionContext = ExecutionContext(config = config, request = requestContext)
-        val results = WebHookActionExecutor.execute(endpoint.actions, executionContext)
+        val lease = ActionGroupExecutionCoordinator.singleFlight.tryAcquire(
+            endpoint.singleFlight,
+            "incoming:${endpoint.id}"
+        )
+        if (lease == null) {
+            respondSingleFlightBusy(call, endpoint, executionContext)
+            return
+        }
+
+        WebHookDebug.log("[XAiWebHook] [请求] 开始执行端点 ${endpoint.id} 的 ${endpoint.actions.size} 个动作...")
+        val results = try {
+            WebHookActionExecutor.execute(endpoint.actions, executionContext)
+        } finally {
+            lease.close()
+        }
         // 业务成功判定只看非 reply 动作；reply 仅用于显式响应控制，其状态码不影响成败判断
         val businessResults = results.filterNot { it.type == "reply" }
         val businessSucceeded = businessResults.all { it.success }
@@ -222,6 +237,28 @@ internal object WebHookServer {
   状态码   : ${status.value}
   业务成功 : $businessSucceeded""")
         call.respondJson(status, body)
+    }
+
+    private suspend fun respondSingleFlightBusy(
+        call: ApplicationCall,
+        endpoint: IncomingEndpoint,
+        executionContext: ExecutionContext
+    ): Unit {
+        WebHookDebug.log(
+            "[XAiWebHook] [单飞] 端点 ${endpoint.id} 的上一轮动作尚未完成，返回 409 " +
+                "key=${endpoint.singleFlight.key ?: "(endpoint)"}"
+        )
+        val body = linkedMapOf<String, Any?>(
+            "success" to false,
+            "error" to "action group busy"
+        )
+        if (endpoint.singleFlight.notify) {
+            TemplateEngine.renderString(endpoint.singleFlight.message, executionContext)
+                .trim()
+                .takeIf { it.isNotEmpty() }
+                ?.let { body["message"] = it }
+        }
+        call.respondJson(HttpStatusCode.Conflict, body)
     }
 
     private fun isLoopbackHost(host: String): Boolean {
