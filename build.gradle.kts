@@ -47,6 +47,7 @@ dependencies {
     implementation("com.vladsch.flexmark:flexmark-all:0.64.8")
     implementation("com.openhtmltopdf:openhtmltopdf-java2d:1.0.10")
     implementation("org.jsoup:jsoup:1.22.2")
+    implementation("com.microsoft.playwright:playwright:1.60.0")
 }
 
 kotlin {
@@ -65,4 +66,12 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+tasks.register<JavaExec>("playwrightInstallChromium") {
+    group = "playwright"
+    description = "Install the Playwright Chromium browser runtime"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.microsoft.playwright.CLI")
+    args("install", "chromium")
 }

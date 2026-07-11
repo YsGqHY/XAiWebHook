@@ -33,6 +33,36 @@ templates:
   # 未解析到变量时的处理：true 保留原始 ${...} 文本，false 替换为空串
   strict_missing_variables: false
 
+# 浏览器自动化设置，用于 send_webpage_screenshot 动作
+browser:
+  # 浏览器动作总开关，默认 false；启用截图动作前必须改为 true
+  enabled: true
+  # 浏览器引擎，可选 chromium、firefox、webkit；使用 Edge/Chrome channel 时必须为 chromium
+  engine: "chromium"
+  # 浏览器发行通道。Windows 可用 msedge 复用系统 Edge；留空则使用 Playwright 默认浏览器
+  channel: "msedge"
+  # 自定义浏览器可执行文件路径，默认留空；配置后优先于 channel
+  executable_path: ""
+  # 是否无界面运行，默认 true；调试登录流程时可临时改为 false
+  headless: true
+  # 浏览器视口宽度，默认 1440，范围 320-7680
+  viewport_width: 1440
+  # 浏览器视口高度，默认 1000，范围 240-4320
+  viewport_height: 1000
+  # 浏览器步骤与导航默认超时（毫秒），默认 30000，范围 1000-300000
+  timeout_ms: 30000
+  # optional 步骤查找元素的最大等待时间（毫秒），默认 1000，范围 100-30000
+  optional_step_timeout_ms: 1000
+  # 允许主页面访问的域名列表；支持精确域名和 *.example.com 子域通配，不能为空
+  allowed_hosts:
+    - "hk.geek2api.com"
+    - "hk2.geek2api.com"
+    - "hk3.geek2api.com"
+    - "hk4.geek2api.com"
+    - "hk5.geek2api.com"
+  # 单张截图最大字节数，默认 10485760（10 MiB），范围 1024-52428800
+  max_screenshot_bytes: 10485760
+
 # 安全相关设置
 security:
   # 命令执行全局开关。execute_command 动作需同时开启此项与动作自身 enabled 才会执行
@@ -65,6 +95,14 @@ incoming:
         # 发送群消息：group_id 必填且需可解析为数字；message 支持模板，单个 request.body 变量超过 200 字符时会渲染为 Markdown 图片
         - type: "send_group_message"
           group_id: "${request.body.group_id}"
+          # at 为目标 QQ，可填单个数字、字符串或列表；为空列表时不 @；仅群消息有效，会生成真正的 Mirai At
+          at: []
+          # at_all 是否 @全体成员，默认 false；仅群消息有效，需机器人在群内有对应权限
+          at_all: false
+          # parse_mirai_code 是否将 message 按 MiraiCode 解析，默认 false；开启后可写 [mirai:at:123456]、[mirai:atall] 等
+          parse_mirai_code: false
+          # mirai_code 可替代 message，填写后会自动按 MiraiCode 解析；示例："[mirai:at:${request.body.target_qq}] ${request.body.message ?: \"\"}"
+          # mirai_code: "[mirai:at:${request.body.target_qq}] ${request.body.message ?: \"\"}"
           message: "${request.body.message ?: \"\"}"
         # reply 构造 HTTP 响应：status 状态码（默认 200），body 任意结构
         - type: "reply"
@@ -81,6 +119,10 @@ incoming:
         # 发送好友消息：friend_id 必填且需可解析为数字；message 支持模板，单个 request.body 变量超过 200 字符时会渲染为 Markdown 图片
         - type: "send_friend_message"
           friend_id: "${request.body.friend_id}"
+          # parse_mirai_code 是否将 message 按 MiraiCode 解析，默认 false；好友消息不支持结构化 at 字段
+          parse_mirai_code: false
+          # mirai_code 可替代 message，填写后会自动按 MiraiCode 解析
+          # mirai_code: "${request.body.mirai_code ?: \"\"}"
           message: "${request.body.message ?: \"\"}"
         - type: "reply"
           status: 200
@@ -88,11 +130,25 @@ incoming:
             success: true
             message: "friend message queued"
 
+    # 同一个网页截图动作也可由 incoming 调用；请求体传 group_id 或 friend_id 指定接收方
+    - id: "webpage-screenshot"
+      # 默认关闭，启用前需配置 browser、环境变量和目标站点登录步骤
+      enabled: false
+      method: "POST"
+      path: "/webpage-screenshot"
+      actions:
+        - ref: "geek2api-monitor-screenshot"
+        - type: "reply"
+          status: 200
+          body:
+            success: true
+            message: "webpage screenshot sent"
+
 # outgoing：mirai 消息事件转发到外部 WebHook
 outgoing:
   # 路由列表。匹配条件之间为「与」关系，未配置的条件跳过：
   # events 事件类型(group_message/friend_message)、groups 群号、friends 好友号、
-  # senders 发送者 QQ、message 文本匹配器、condition 布尔条件、actions 匹配后执行的动作
+  # senders 发送者 QQ、message 文本匹配器、condition 布尔条件、cooldown 指令冷却、actions 动作
   routes:
     - id: "group-message-forward"
       # 示例路由默认关闭，启用前请先填入真实 URL
@@ -118,6 +174,32 @@ outgoing:
             sender_name: "${event.senderName}"
             message: "${event.messageText}"
 
+    # 群成员发送“监控截图”时执行网页登录与截图动作，并自动把图片发回当前群
+    - id: "geek2api-monitor-command"
+      # 默认关闭；启用前需同时开启 browser.enabled 和下方命名动作
+      enabled: false
+      events: ["group_message"]
+      # 使用占位群号，生产环境替换为允许触发截图的群；留空表示不限制群
+      groups: [123456789]
+      message:
+        contains: ["监控截图"]
+      # 指令冷却仅作用于本路由；未配置 cooldown 时完全不启用
+      cooldown:
+        # 冷却开关；配置了 cooldown 区块时默认 true
+        enabled: true
+        # 普通用户个人冷却（毫秒），按发送者 QQ 独立计时；默认 0，范围 0-604800000
+        personal_ms: 60000
+        # 群管理员/群主或插件管理员的个人冷却（毫秒）；默认继承 personal_ms，范围 0-604800000
+        administrator_ms: 10000
+        # 本路由所有未绕过用户共享的全局冷却（毫秒）；默认 0，范围 0-604800000
+        global_ms: 5000
+        # 被冷却拦截时是否向当前群或好友发送提示，默认 true
+        notify: true
+        # 提示支持 cooldown.routeId/scope/remainingMillis/remainingSeconds 变量
+        message: "监控截图指令冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        - ref: "geek2api-monitor-screenshot"
+
     - id: "friend-message-forward"
       enabled: false
       events: ["friend_message"]
@@ -135,6 +217,83 @@ outgoing:
 
 # actions：可复用的命名动作，incoming/outgoing 可用字符串名或 ref 引用
 actions:
+  # Geek2Api 监控页面截图示例；首次使用 CLI Bridge 打开系统浏览器授权，后续自动刷新登录态
+  geek2api-monitor-screenshot:
+    type: "send_webpage_screenshot"
+    # 默认关闭；启用前需同时设置 browser.enabled: true，并确保 mirai 所在系统可打开默认浏览器
+    enabled: false
+    # 登录会话复用键；相同键会在内存中复用 token/Cookie/localStorage，reload 或停服时清理
+    session_key: "geek2api-monitor"
+    # incoming 可通过请求体指定群号；outgoing 中变量为空时自动回退到触发事件所在会话
+    group_id: "${request.body.group_id}"
+    # incoming 可通过请求体指定好友号；group_id 和 friend_id 不能同时有效
+    friend_id: "${request.body.friend_id}"
+    # 首次触发会打开系统浏览器，用户须在 5 分钟内完成登录授权；已有有效会话时不会重复打开
+    pending_message: "正在获取监控截图..."
+    # 截图失败时发送给聊天用户的脱敏提示，内部详细原因仅写控制台日志
+    failure_message: "监控页面截图失败，请稍后重试。"
+    # 图片前的可选说明文字，留空时只发送图片
+    message: ""
+    # CLI Bridge 与 token/token_env、login 三种认证源必须且只能配置一种
+    auth:
+      cli_bridge:
+        # 创建 300 秒桥接会话，请求体固定为 {}
+        start_url: "https://hk3.geek2api.com/api/v1/auth/cli-bridge/start"
+        # 系统浏览器授权页；插件只附加 bridge_id，绝不会把 poll_secret 放入 URL
+        browser_url: "https://hk3.geek2api.com/cli-bridge"
+        # 轮询授权结果，请求体为 bridge_id + poll_secret；token 只会交付一次
+        poll_url: "https://hk3.geek2api.com/api/v1/auth/cli-bridge/poll"
+        # 取得 token 后读取当前用户，补齐前端路由守卫要求的 auth_user
+        profile_url: "https://hk3.geek2api.com/api/v1/user/profile"
+        # access token 临近过期时提交 refresh_token，并覆盖旋转后的 token pair
+        refresh_url: "https://hk3.geek2api.com/api/v1/auth/refresh"
+        # 轮询间隔默认 2500 毫秒，范围 2000-30000，避免触发 120 次/分钟限流
+        poll_interval_ms: 2500
+        # 单次授权最多等待 300000 毫秒，且不会超过 start 返回的 expires_in
+        max_wait_ms: 300000
+        # access token 到期前 120 秒刷新，范围 0-3600
+        refresh_before_expiry_seconds: 120
+        # 授权失败后 60 秒内不重新 start，避免触发 20 次/分钟限流
+        retry_cooldown_ms: 60000
+      # 授权成功后按 Geek2Api 前端约定写入四个 localStorage 键
+      local_storage:
+        # 必须是 browser.allowed_hosts 中的无路径 origin
+        origin: "https://hk3.geek2api.com"
+        # access_token 写入的键名
+        key: "auth_token"
+        # access token 前缀，Geek2Api 使用原始 token，因此留空
+        prefix: ""
+        # refresh_token 写入的键名
+        refresh_token_key: "refresh_token"
+        # 当前时间 + expires_in 写入的毫秒时间戳键名
+        expires_at_key: "token_expires_at"
+        # profile 用户对象序列化后的键名
+        user_key: "auth_user"
+    # CLI Bridge 登录在真实系统浏览器完成，可使用账号密码、OAuth、验证码和网页 2FA
+    # 浏览器步骤按顺序执行；四个登录态键会在首次 goto 前注入 Playwright BrowserContext
+    steps:
+      - op: "goto"
+        url: "https://hk3.geek2api.com/monitor"
+        # 导航等待阶段，默认 commit；可选 commit/domcontentloaded/load/networkidle
+        # commit 只等待服务器开始返回目标文档，页面就绪继续由后续 wait 精确判断，避免 SPA 的 DOMContentLoaded 假超时
+        wait_until: "commit"
+        timeout_ms: 30000
+      # 先等待截图主区域挂载；该区域在骨架屏阶段就会出现，不能单独作为加载完成条件
+      - op: "wait"
+        selector: '//*[@id="app"]/div[2]/div[2]/main'
+        state: "visible"
+      # hk3 骨架卡片是 div.animate-pulse；加载完成后会出现真实 button 卡片或合法的 .empty-state
+      # 任一完成态可见时，Vue 已结束首次数据加载，骨架分支也已移除
+      - op: "wait"
+        selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
+        state: "visible"
+        timeout_ms: 90000
+    screenshot:
+      # 最终元素定位器，支持 CSS 或 XPath
+      selector: '//*[@id="app"]/div[2]/div[2]/main'
+      # 截图元素等待与截图操作超时，单位毫秒；默认回退 browser.timeout_ms
+      timeout_ms: 30000
+
   # 命令执行动作示例，默认 enabled: false 且需开启 security.allow_command_execution 才会执行
   disabled-command-example:
     type: "execute_command"

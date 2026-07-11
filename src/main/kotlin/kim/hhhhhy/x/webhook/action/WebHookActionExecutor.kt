@@ -30,12 +30,17 @@ import net.mamoe.mirai.console.command.CommandManager
 import net.mamoe.mirai.console.command.ConsoleCommandSender
 import net.mamoe.mirai.console.command.descriptor.ExperimentalCommandDescriptors
 import net.mamoe.mirai.contact.Contact
+import net.mamoe.mirai.message.code.MiraiCode
+import net.mamoe.mirai.message.data.At
+import net.mamoe.mirai.message.data.AtAll
 import net.mamoe.mirai.message.data.Message
 import net.mamoe.mirai.message.data.MessageChainBuilder
 import net.mamoe.mirai.message.data.PlainText
 import net.mamoe.mirai.utils.ExternalResource.Companion.toExternalResource
 
 internal object WebHookActionExecutor {
+    private val singleExpressionRegex = Regex("""^\$\{(.+)}$""")
+
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -85,17 +90,23 @@ internal object WebHookActionExecutor {
         return results
     }
 
+    fun reload(): Unit {
+        WebPageScreenshotAction.reset()
+    }
+
     fun close(): Unit {
         synchronized(clientLock) {
             clientRef?.close()
             clientRef = null
         }
+        WebPageScreenshotAction.close()
     }
 
     private suspend fun executeAction(action: ActionConfig, context: ExecutionContext): ActionResult {
         return when (action.type) {
             "send_group_message" -> sendGroupMessage(action, context)
             "send_friend_message" -> sendFriendMessage(action, context)
+            "send_webpage_screenshot" -> sendWebpageScreenshot(action, context)
             "http_request" -> httpRequest(action, context)
             "execute_command" -> executeCommand(action, context)
             "reply" -> reply(action, context)
@@ -107,14 +118,15 @@ internal object WebHookActionExecutor {
         val bot = XAiWebHook.bot ?: error("no bot instance available")
         val groupId = renderString(action.params["group_id"], context).toLongOrNull()
             ?: error("group_id is required")
-        val messageTemplate = action.params["message"]?.toString().orEmpty()
+        val messageTemplate = messageTemplate(action)
         val renderedPreviewText = renderString(messageTemplate, context)
         val preview = renderedPreviewText.take(20).let { if (renderedPreviewText.length > 20) "$it..." else it }
         WebHookDebug.log("""[XAiWebHook] [动作] 发送群消息
   groupId  : $groupId
   message  : $preview""")
+        val options = incomingMessageOptions(action, context, allowAt = true)
         val group = bot.getGroup(groupId) ?: error("group not found: $groupId")
-        group.sendMessage(renderIncomingMessage(messageTemplate, context, group))
+        group.sendMessage(renderIncomingMessage(messageTemplate, context, group, options))
         WebHookDebug.log("[XAiWebHook] [动作] 群消息发送成功：groupId=$groupId")
         return ActionResult(action.type, success = true, message = "sent group message", status = 200)
     }
@@ -123,16 +135,78 @@ internal object WebHookActionExecutor {
         val bot = XAiWebHook.bot ?: error("no bot instance available")
         val friendId = renderString(action.params["friend_id"], context).toLongOrNull()
             ?: error("friend_id is required")
-        val messageTemplate = action.params["message"]?.toString().orEmpty()
+        val messageTemplate = messageTemplate(action)
         val renderedPreviewText = renderString(messageTemplate, context)
         val preview = renderedPreviewText.take(20).let { if (renderedPreviewText.length > 20) "$it..." else it }
         WebHookDebug.log("""[XAiWebHook] [动作] 发送好友消息
   friendId : $friendId
   message  : $preview""")
         val friend = bot.getFriend(friendId) ?: error("friend not found: $friendId")
-        friend.sendMessage(renderIncomingMessage(messageTemplate, context, friend))
+        val options = incomingMessageOptions(action, context, allowAt = false)
+        friend.sendMessage(renderIncomingMessage(messageTemplate, context, friend, options))
         WebHookDebug.log("[XAiWebHook] [动作] 好友消息发送成功：friendId=$friendId")
         return ActionResult(action.type, success = true, message = "sent friend message", status = 200)
+    }
+
+    private suspend fun sendWebpageScreenshot(action: ActionConfig, context: ExecutionContext): ActionResult {
+        val target = resolveScreenshotTarget(action, context)
+        val contact = screenshotContact(target)
+        val pendingMessage = renderString(action.params["pending_message"], context)
+        val failureMessage = renderString(action.params["failure_message"], context)
+        val caption = renderString(action.params["message"], context)
+
+        return try {
+            if (pendingMessage.isNotBlank()) {
+                contact.sendMessage(PlainText(pendingMessage))
+            }
+            val bytes = WebPageScreenshotAction.capture(action, context)
+            val image = bytes.toExternalResource("png").use { resource ->
+                contact.uploadImage(resource)
+            }
+            if (caption.isBlank()) {
+                contact.sendMessage(image)
+            } else {
+                contact.sendMessage(MessageChainBuilder().append(PlainText(caption)).append(image).build())
+            }
+            WebHookDebug.log("[XAiWebHook] [动作] 网页截图发送成功：target=$target bytes=${bytes.size}")
+            ActionResult(action.type, success = true, message = "sent webpage screenshot", status = 200)
+        } catch (error: Throwable) {
+            XAiWebHook.logger.error("Webpage screenshot action failed id=${action.id ?: "(inline)"}", error)
+            if (failureMessage.isNotBlank()) {
+                runCatching { contact.sendMessage(PlainText(failureMessage)) }
+                    .onFailure { sendError ->
+                        XAiWebHook.logger.warning("Failed to send webpage screenshot failure message: ${sendError.message}")
+                    }
+            }
+            ActionResult(
+                type = action.type,
+                success = false,
+                message = error.message?.take(500) ?: "webpage screenshot failed",
+                status = 500
+            )
+        }
+    }
+
+    internal fun resolveScreenshotTarget(action: ActionConfig, context: ExecutionContext): ScreenshotTarget {
+        val configuredGroupId = renderString(action.params["group_id"], context).toLongOrNull()
+        val configuredFriendId = renderString(action.params["friend_id"], context).toLongOrNull()
+        require(configuredGroupId == null || configuredFriendId == null) {
+            "only one of group_id or friend_id may be set"
+        }
+        if (configuredGroupId != null) return ScreenshotTarget.Group(configuredGroupId)
+        if (configuredFriendId != null) return ScreenshotTarget.Friend(configuredFriendId)
+
+        context.event?.groupId?.let { return ScreenshotTarget.Group(it) }
+        context.event?.friendId?.let { return ScreenshotTarget.Friend(it) }
+        error("group_id or friend_id is required when there is no outgoing event target")
+    }
+
+    private fun screenshotContact(target: ScreenshotTarget): Contact {
+        val bot = XAiWebHook.bot ?: error("no bot instance available")
+        return when (target) {
+            is ScreenshotTarget.Group -> bot.getGroup(target.id) ?: error("group not found: ${target.id}")
+            is ScreenshotTarget.Friend -> bot.getFriend(target.id) ?: error("friend not found: ${target.id}")
+        }
     }
 
     private suspend fun httpRequest(action: ActionConfig, context: ExecutionContext): ActionResult {
@@ -188,22 +262,59 @@ internal object WebHookActionExecutor {
         return ActionResult(action.type, success = true, message = "reply", responseBody = body, status = status)
     }
 
-    private suspend fun renderIncomingMessage(template: String, context: ExecutionContext, contact: Contact): Message {
+    private suspend fun renderIncomingMessage(
+        template: String,
+        context: ExecutionContext,
+        contact: Contact,
+        options: IncomingMessageOptions
+    ): Message {
         val segments = TemplateEngine.renderIncomingMessage(template, context)
-        if (segments.size == 1 && segments.first() is IncomingMessageSegment.Text) {
+        if (!options.hasPrefix && !options.parseMiraiCode && segments.size == 1 && segments.first() is IncomingMessageSegment.Text) {
             return PlainText((segments.first() as IncomingMessageSegment.Text).value)
         }
 
         val builder = MessageChainBuilder()
+        appendIncomingPrefix(builder, options)
         segments.forEach { segment ->
             when (segment) {
-                is IncomingMessageSegment.Text -> if (segment.value.isNotEmpty()) builder.append(PlainText(segment.value))
+                is IncomingMessageSegment.Text -> appendIncomingText(builder, segment.value, contact, options.parseMiraiCode)
                 is IncomingMessageSegment.MarkdownImage -> uploadMarkdownImages(segment.markdown, contact).forEach { image ->
                     builder.append(image)
                 }
             }
         }
         return builder.build()
+    }
+
+    private fun appendIncomingPrefix(builder: MessageChainBuilder, options: IncomingMessageOptions): Unit {
+        if (options.atAll) {
+            builder.append(AtAll)
+            builder.append(PlainText(" "))
+        }
+        options.atTargets.forEach { target ->
+            builder.append(At(target))
+            builder.append(PlainText(" "))
+        }
+    }
+
+    private fun appendIncomingText(
+        builder: MessageChainBuilder,
+        text: String,
+        contact: Contact,
+        parseMiraiCode: Boolean
+    ): Unit {
+        if (text.isEmpty()) return
+        if (!parseMiraiCode) {
+            builder.append(PlainText(text))
+            return
+        }
+
+        val message = runCatching { MiraiCode.deserializeMiraiCode(text, contact) }
+            .getOrElse { error ->
+                XAiWebHook.logger.warning("Failed to parse incoming MiraiCode, fallback to plain text: ${error.message}")
+                PlainText(text)
+            }
+        builder.append(message)
     }
 
     private suspend fun uploadMarkdownImages(markdown: String, contact: Contact): List<Message> {
@@ -216,6 +327,73 @@ internal object WebHookActionExecutor {
 
     private fun renderString(value: Any?, context: ExecutionContext): String {
         return TemplateEngine.renderString(value?.toString().orEmpty(), context)
+    }
+
+    private fun messageTemplate(action: ActionConfig): String {
+        return action.params["mirai_code"]?.toString() ?: action.params["message"]?.toString().orEmpty()
+    }
+
+    private fun incomingMessageOptions(
+        action: ActionConfig,
+        context: ExecutionContext,
+        allowAt: Boolean
+    ): IncomingMessageOptions {
+        return IncomingMessageOptions(
+            atTargets = if (allowAt) renderAtTargets(action, context) else emptyList(),
+            atAll = allowAt && renderBoolean(action.params["at_all"], context),
+            parseMiraiCode = action.params.containsKey("mirai_code") || renderBoolean(action.params["parse_mirai_code"], context)
+        )
+    }
+
+    private fun renderAtTargets(action: ActionConfig, context: ExecutionContext): List<Long> {
+        val values = listOfNotNull(
+            action.params["at"],
+            action.params["at_qq"],
+            action.params["at_targets"]
+        )
+        return values.flatMap { renderLongList(it, context) }.distinct()
+    }
+
+    private fun renderLongList(value: Any?, context: ExecutionContext): List<Long> {
+        return when (val rendered = renderParam(value, context)) {
+            is List<*> -> rendered.flatMap { renderLongList(it, context) }
+            is Number -> listOf(rendered.toLong()).filter { it > 0L }
+            is String -> Regex("""\d+""").findAll(rendered).mapNotNull { match ->
+                match.value.toLongOrNull()?.takeIf { it > 0L }
+            }.toList()
+            else -> emptyList()
+        }
+    }
+
+    private fun renderBoolean(value: Any?, context: ExecutionContext): Boolean {
+        return when (val rendered = renderParam(value, context)) {
+            is Boolean -> rendered
+            is Number -> rendered.toInt() != 0
+            is String -> rendered.equals("true", ignoreCase = true) || rendered == "1"
+            else -> false
+        }
+    }
+
+    private fun renderParam(value: Any?, context: ExecutionContext): Any? {
+        return when (value) {
+            is String -> {
+                val expression = singleExpressionRegex.matchEntire(value.trim())?.groupValues?.get(1)
+                if (expression != null) TemplateEngine.evaluateValue(expression, context) else TemplateEngine.renderString(value, context)
+            }
+            is List<*> -> value.map { renderParam(it, context) }
+            is Map<*, *> -> value.mapNotNull { (key, mapValue) ->
+                key?.toString()?.let { it to renderParam(mapValue, context) }
+            }.toMap()
+            else -> value
+        }
+    }
+
+    private data class IncomingMessageOptions(
+        val atTargets: List<Long> = emptyList(),
+        val atAll: Boolean = false,
+        val parseMiraiCode: Boolean = false
+    ) {
+        val hasPrefix: Boolean = atTargets.isNotEmpty() || atAll
     }
 
     private fun Any?.asStringMap(): Map<String, String> {
@@ -241,4 +419,9 @@ internal object WebHookActionExecutor {
             else -> JsonPrimitive(value.toString())
         }
     }
+}
+
+internal sealed class ScreenshotTarget {
+    internal data class Group(val id: Long) : ScreenshotTarget()
+    internal data class Friend(val id: Long) : ScreenshotTarget()
 }
