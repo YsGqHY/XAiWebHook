@@ -38,10 +38,20 @@ public object XAiWebHook : KotlinPlugin(
         )
     }
 
+    public val PERMISSION_COOLDOWN_BYPASS: Permission by lazy {
+        PermissionService.INSTANCE.register(
+            permissionId("cooldown-bypass"),
+            "XAiWebHook outgoing 指令冷却绕过权限"
+        )
+    }
+
     public override fun onEnable(): Unit {
         WebHookDebug.log("[XAiWebHook] 插件启动中...")
         WebHookDebug.log("[XAiWebHook] 正在加载配置文件...")
         WebHookConfig.load()
+        WebHookDebug.log("[XAiWebHook] 正在注册 outgoing 冷却绕过权限...")
+        PERMISSION_COOLDOWN_BYPASS
+        WebHookEventListener.clearCooldowns()
         WebHookDebug.log("[XAiWebHook] 正在注册消息事件监听器...")
         registerListenerHost(WebHookEventListener)
         WebHookDebug.log("[XAiWebHook] 正在注册控制台命令...")
@@ -56,6 +66,8 @@ public object XAiWebHook : KotlinPlugin(
         WebHookDebug.log("[XAiWebHook] 插件正在停止...")
         WebHookDebug.log("[XAiWebHook] 正在停止 HTTP 服务...")
         WebHookServer.stop()
+        WebHookDebug.log("[XAiWebHook] 正在清理 outgoing 冷却状态...")
+        WebHookEventListener.clearCooldowns()
         WebHookDebug.log("[XAiWebHook] 正在关闭 HTTP 客户端...")
         WebHookActionExecutor.close()
         logger.info("XAiWebHook disabled")

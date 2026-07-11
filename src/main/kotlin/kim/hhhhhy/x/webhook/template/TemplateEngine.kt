@@ -134,6 +134,14 @@ internal object TemplateEngine {
                     "timestamp" to it.timestamp
                 )
             }
+            "cooldown" -> context.cooldown?.let {
+                mapOf(
+                    "routeId" to it.routeId,
+                    "scope" to it.scope,
+                    "remainingMillis" to it.remainingMillis,
+                    "remainingSeconds" to it.remainingSeconds
+                )
+            }
             else -> null
         }
 

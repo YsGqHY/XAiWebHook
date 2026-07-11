@@ -1,8 +1,11 @@
 package kim.hhhhhy.x.webhook.command
 
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
+import kim.hhhhhy.x.webhook.action.WebPageScreenshotAction
 import kim.hhhhhy.x.webhook.config.WebHookConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
+import kim.hhhhhy.x.webhook.listener.WebHookEventListener
 import kim.hhhhhy.x.webhook.server.WebHookServer
 import net.mamoe.mirai.console.command.CommandSender
 import net.mamoe.mirai.console.command.CompositeCommand
@@ -18,6 +21,8 @@ public object XAiWebHookCommand : CompositeCommand(
     public suspend fun CommandSender.reload(): Unit {
         WebHookDebug.log("[XAiWebHook] [命令] 收到 reload 命令，开始重载配置...")
         WebHookConfig.reload()
+        WebHookActionExecutor.reload()
+        WebHookEventListener.clearCooldowns()
         WebHookServer.restart(WebHookConfig.current)
         val config = WebHookConfig.current
         val configError = WebHookConfig.lastError
@@ -36,6 +41,7 @@ public object XAiWebHookCommand : CompositeCommand(
             appendLine("incoming endpoints: ${config.incoming.endpoints.size}")
             appendLine("outgoing routes: ${config.outgoing.routes.size}")
             appendLine("server: ${if (WebHookServer.running) "running" else "stopped"}")
+            appendLine("browser: ${browserStatus(config.browser.enabled, config.browser.engine, config.browser.channel)}")
             if (serverError != null) appendLine("server error: $serverError")
         }
         sendMessage(feedback.trimEnd())
@@ -52,9 +58,23 @@ public object XAiWebHookCommand : CompositeCommand(
             appendLine("listen: ${config.server.host}:${config.server.port}${config.server.basePath}")
             appendLine("incoming endpoints: ${config.incoming.endpoints.size}")
             appendLine("outgoing routes: ${config.outgoing.routes.size}")
+            appendLine("browser: ${browserStatus(config.browser.enabled, config.browser.engine, config.browser.channel)}")
             appendLine("config error: ${WebHookConfig.lastError ?: "none"}")
             appendLine("server error: ${WebHookServer.lastError ?: "none"}")
+            appendLine("browser error: ${WebPageScreenshotAction.lastError ?: "none"}")
         }
         sendMessage(status)
+    }
+
+    private fun browserStatus(enabled: Boolean, engine: String, channel: String?): String {
+        if (!enabled) return "disabled"
+        return buildString {
+            append("enabled, engine=")
+            append(engine)
+            if (channel != null) {
+                append(", channel=")
+                append(channel)
+            }
+        }
     }
 }

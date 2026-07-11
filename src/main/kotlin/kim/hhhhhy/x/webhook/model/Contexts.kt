@@ -22,10 +22,18 @@ internal data class EventContext(
     val timestamp: Long
 )
 
+internal data class CooldownContext(
+    val routeId: String,
+    val scope: String,
+    val remainingMillis: Long,
+    val remainingSeconds: Long
+)
+
 internal data class ExecutionContext(
     val config: PluginConfig,
     val request: RequestContext? = null,
-    val event: EventContext? = null
+    val event: EventContext? = null,
+    val cooldown: CooldownContext? = null
 )
 
 internal data class ActionResult(
