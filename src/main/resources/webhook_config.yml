@@ -53,6 +53,11 @@ browser:
   timeout_ms: 30000
   # optional 步骤查找元素的最大等待时间（毫秒），默认 1000，范围 100-30000
   optional_step_timeout_ms: 1000
+  # 是否持久化 session_key 对应的 Cookie/localStorage，省略时默认 false；
+  # 缓存含敏感登录态，默认保持关闭；确需跨 reload/重启恢复登录时再启用并限制目录访问权限
+  session_cache_enabled: false
+  # 会话缓存目录，默认 browser-session-cache；相对路径基于插件配置目录，文件名使用 session_key 哈希
+  session_cache_dir: "browser-session-cache"
   # 允许主页面访问的域名列表；支持精确域名和 *.example.com 子域通配，不能为空
   allowed_hosts:
     - "hk.geek2api.com"
@@ -136,6 +141,16 @@ incoming:
       enabled: false
       method: "POST"
       path: "/webpage-screenshot"
+      # actions 动作组单飞控制；未配置 single_flight 时默认关闭
+      single_flight:
+        # 开启后，上一轮 actions 未全部结束前拒绝下一次触发
+        enabled: true
+        # 可选共享键；省略时仅当前 endpoint 互斥，相同键可与其他 endpoint/route 共同互斥
+        key: "geek2api-monitor-screenshot"
+        # 忙碌时是否返回自定义 message；incoming 无论该值如何都会返回 HTTP 409
+        notify: true
+        # 支持当前 request/event 模板变量；空字符串可只返回通用 action group busy 错误
+        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
       actions:
         - ref: "geek2api-monitor-screenshot"
         - type: "reply"
@@ -146,9 +161,9 @@ incoming:
 
 # outgoing：mirai 消息事件转发到外部 WebHook
 outgoing:
-  # 路由列表。匹配条件之间为「与」关系，未配置的条件跳过：
-  # events 事件类型(group_message/friend_message)、groups 群号、friends 好友号、
-  # senders 发送者 QQ、message 文本匹配器、condition 布尔条件、cooldown 指令冷却、actions 动作
+  # 路由列表。events/groups/friends/senders/message/condition 之间为「与」关系，未配置的条件跳过；
+  # message 内的 contains/starts_with/ends_with/regex 四类之间为「或」关系，任意一项命中即通过文本匹配。
+  # single_flight、cooldown 与 actions 在路由匹配通过后依次处理。
   routes:
     - id: "group-message-forward"
       # 示例路由默认关闭，启用前请先填入真实 URL
@@ -156,7 +171,7 @@ outgoing:
       events: ["group_message"]
       groups: [123456789]
       message:
-        # contains/starts_with/ends_with/regex 四类，各为列表，类内任一命中即该类匹配
+        # contains/starts_with/ends_with/regex 四类均为列表，所有已配置项之间为「或」关系
         contains: ["关键词"]
       actions:
         # http_request：向外部发起 HTTP 请求。method 默认 POST，
@@ -182,7 +197,19 @@ outgoing:
       # 使用占位群号，生产环境替换为允许触发截图的群；留空表示不限制群
       groups: [123456789]
       message:
-        contains: ["监控截图"]
+        # 任意满足即触发：消息包含“炸了么”，或以“状态检查”/“监控截图”开头
+        contains: ["炸了么"]
+        starts_with: ["状态检查", "监控截图"]
+      # 动作组单飞在 actions 执行期间持续生效；与 incoming 使用同一 key，避免重复截图
+      single_flight:
+        # 开启后，上一轮 actions 未全部结束前拒绝下一次触发；未配置区块时默认关闭
+        enabled: true
+        # 可选共享键；省略时仅按当前 route.id 互斥，相同键可跨 endpoint/route 共同互斥
+        key: "geek2api-monitor-screenshot"
+        # 被拦截时是否向当前群或好友发送提示，默认 true
+        notify: true
+        # 提示支持当前 event 模板变量；空字符串可静默拦截
+        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
       # 指令冷却仅作用于本路由；未配置 cooldown 时完全不启用
       cooldown:
         # 冷却开关；配置了 cooldown 区块时默认 true
@@ -222,13 +249,13 @@ actions:
     type: "send_webpage_screenshot"
     # 默认关闭；启用前需同时设置 browser.enabled: true，并确保 mirai 所在系统可打开默认浏览器
     enabled: false
-    # 登录会话复用键；相同键会在内存中复用 token/Cookie/localStorage，reload 或停服时清理
+    # 登录会话复用键；相同键复用 token/Cookie/localStorage，开启 browser.session_cache_enabled 后可跨 reload/重启恢复
     session_key: "geek2api-monitor"
     # incoming 可通过请求体指定群号；outgoing 中变量为空时自动回退到触发事件所在会话
     group_id: "${request.body.group_id}"
     # incoming 可通过请求体指定好友号；group_id 和 friend_id 不能同时有效
     friend_id: "${request.body.friend_id}"
-    # 首次触发会打开系统浏览器，用户须在 5 分钟内完成登录授权；已有有效会话时不会重复打开
+    # 首次触发会打开系统浏览器，用户须在 5 分钟内完成登录授权；内存或磁盘缓存仍有效时不会重复打开
     pending_message: "正在获取监控截图..."
     # 截图失败时发送给聊天用户的脱敏提示，内部详细原因仅写控制台日志
     failure_message: "监控页面截图失败，请稍后重试。"
@@ -291,8 +318,22 @@ actions:
     screenshot:
       # 最终元素定位器，支持 CSS 或 XPath
       selector: '//*[@id="app"]/div[2]/div[2]/main'
+      # 截图瞬间临时隐藏的 CSS selector 列表；不会修改页面，最多 32 项
+      # Geek2Api 的 AppHeader 是 header.sticky，会在长 main 元素截图滚动时覆盖顶部内容
+      hide_selectors: ["header.sticky"]
       # 截图元素等待与截图操作超时，单位毫秒；默认回退 browser.timeout_ms
       timeout_ms: 30000
+      # 截图前等待网页字体完成加载的最长时间（毫秒）；默认 3000 且不超过 timeout_ms，0 表示不等待
+      # 字体请求超时或长期挂起时会使用当前回退字体继续截图，不再让整个截图动作失败
+      font_wait_timeout_ms: 3000
+      # 浏览器步骤或截图发生可重试的超时/网络错误时，重新打开 Page 并执行整套 steps + screenshot
+      retry:
+        # 重试开关；未配置 retry 区块时默认关闭，配置区块后默认 true
+        enabled: true
+        # 首次失败后的最大额外重试次数，默认 2，范围 0-10；2 表示最多共尝试 3 次
+        max_retries: 2
+        # 两次尝试之间的固定等待时间（毫秒），默认 1000，范围 0-60000
+        delay_ms: 1000
 
   # 命令执行动作示例，默认 enabled: false 且需开启 security.allow_command_execution 才会执行
   disabled-command-example:

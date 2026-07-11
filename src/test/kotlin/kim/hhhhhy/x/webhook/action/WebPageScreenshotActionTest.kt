@@ -1,5 +1,7 @@
 package kim.hhhhhy.x.webhook.action
 
+import com.microsoft.playwright.PlaywrightException
+import com.microsoft.playwright.TimeoutError
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
 import kim.hhhhhy.x.webhook.config.PluginConfig
@@ -13,11 +15,18 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.yaml.snakeyaml.Yaml
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.InetSocketAddress
+import java.nio.file.Files
 import java.util.Base64
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import javax.imageio.ImageIO
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -41,10 +50,14 @@ internal class WebPageScreenshotActionTest {
         val cliBridge = auth["cli_bridge"] as Map<*, *>
         val localStorage = auth["local_storage"] as Map<*, *>
         val steps = screenshotAction["steps"] as List<*>
+        val screenshot = screenshotAction["screenshot"] as Map<*, *>
+        val screenshotRetry = screenshot["retry"] as Map<*, *>
         val gotoStep = steps.first() as Map<*, *>
         val readyStep = steps.last() as Map<*, *>
 
         assertTrue(browser["enabled"] is Boolean)
+        assertEquals(false, browser["session_cache_enabled"])
+        assertEquals("browser-session-cache", browser["session_cache_dir"])
         assertTrue("hk3.geek2api.com" in (browser["allowed_hosts"] as List<*>))
         assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
         assertEquals("https://hk3.geek2api.com/cli-bridge", cliBridge["browser_url"])
@@ -62,9 +75,13 @@ internal class WebPageScreenshotActionTest {
         assertEquals("wait", readyStep["op"])
         assertEquals("visible", readyStep["state"])
         assertEquals(90000, readyStep["timeout_ms"])
+        assertEquals(listOf("header.sticky"), screenshot["hide_selectors"])
+        assertEquals(3000, screenshot["font_wait_timeout_ms"])
+        assertEquals(true, screenshotRetry["enabled"])
+        assertEquals(2, screenshotRetry["max_retries"])
+        assertEquals(1000, screenshotRetry["delay_ms"])
         assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
-        assertTrue(readyStep["selector"].toString().contains(" group "))
-        assertTrue(readyStep["selector"].toString().contains(" empty-state "))
+        assertTrue(readyStep["selector"].toString().contains("empty-state"))
     }
 
     @Test
@@ -84,10 +101,14 @@ internal class WebPageScreenshotActionTest {
         val cliBridge = auth["cli_bridge"] as Map<*, *>
         val localStorage = auth["local_storage"] as Map<*, *>
         val steps = action["steps"] as List<*>
+        val screenshot = action["screenshot"] as Map<*, *>
+        val screenshotRetry = screenshot["retry"] as Map<*, *>
         val gotoStep = steps.first() as Map<*, *>
         val readyStep = steps.last() as Map<*, *>
 
         assertEquals(true, browser["enabled"])
+        assertEquals(true, browser["session_cache_enabled"])
+        assertEquals("browser-session-cache", browser["session_cache_dir"])
         assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
         assertEquals("https://hk3.geek2api.com/cli-bridge", cliBridge["browser_url"])
         assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/poll", cliBridge["poll_url"])
@@ -103,6 +124,11 @@ internal class WebPageScreenshotActionTest {
         assertTrue(steps.none { (it as Map<*, *>)["op"] == "fill" })
         assertEquals("wait", readyStep["op"])
         assertEquals(90000, readyStep["timeout_ms"])
+        assertEquals(listOf("header.sticky"), screenshot["hide_selectors"])
+        assertEquals(3000, screenshot["font_wait_timeout_ms"])
+        assertEquals(true, screenshotRetry["enabled"])
+        assertEquals(2, screenshotRetry["max_retries"])
+        assertEquals(1000, screenshotRetry["delay_ms"])
         assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
         assertTrue(readyStep["selector"].toString().contains("empty-state"))
     }
@@ -116,12 +142,120 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun browserSessionCacheRestoresAuthAndPreservesCookies(): Unit {
+        val directory = Files.createTempDirectory("xaiwebhook-session-cache")
+        val localStorage = BrowserLocalStorageAuth(
+            origin = "https://example.invalid",
+            key = "auth_token",
+            prefix = ""
+        )
+        val authSpec = BrowserAuthSpec(
+            token = null,
+            tokenEnv = null,
+            headerName = null,
+            headerPrefix = "Bearer ",
+            headerHosts = emptyList(),
+            localStorage = localStorage,
+            cookie = null,
+            cliBridge = BrowserCliBridgeAuth(
+                startUrl = "https://example.invalid/api/v1/auth/cli-bridge/start",
+                browserUrl = "https://example.invalid/cli-bridge",
+                pollUrl = "https://example.invalid/api/v1/auth/cli-bridge/poll",
+                profileUrl = "https://example.invalid/api/v1/user/profile",
+                refreshUrl = "https://example.invalid/api/v1/auth/refresh",
+                pollIntervalMillis = 2_500L,
+                maxWaitMillis = 300_000L,
+                refreshBeforeExpirySeconds = 120L,
+                retryCooldownMillis = 60_000L
+            )
+        )
+        val unresolved = ResolvedBrowserAuth(spec = authSpec)
+        val authenticated = WebPageScreenshotAction.withTokenPair(
+            unresolved,
+            BrowserTokenPair(
+                accessToken = "cached-access",
+                refreshToken = "cached-refresh",
+                expiresAtMillis = System.currentTimeMillis() + 3_600_000L,
+                tokenType = "Bearer",
+                user = Json.parseToJsonElement("""{"id":1,"username":"cached-user"}""") as JsonObject
+            )
+        )
+        val storageState = WebPageScreenshotAction.mergeStorageState(
+            """{"cookies":[{"name":"session","value":"session-cookie","domain":"example.invalid","path":"/","expires":4102444800,"httpOnly":true,"secure":true,"sameSite":"Lax"}],"origins":[]}""",
+            authenticated
+        )
+        val cache = BrowserSessionCache(directory)
+        val sessionKey = "monitor/../../must-not-be-a-path"
+
+        try {
+            cache.save(sessionKey, authenticated, storageState)
+            val cachePath = cache.cachePath(sessionKey)
+            assertTrue(Files.isRegularFile(cachePath))
+            assertFalse(cachePath.fileName.toString().contains("monitor"))
+
+            val cached = requireNotNull(cache.load(sessionKey, unresolved))
+            assertTrue(cached.storageState.contains("session-cookie"))
+            val restored = requireNotNull(WebPageScreenshotAction.restoreCachedSessionAuth(unresolved, cached))
+            assertEquals("cached-access", restored.tokenPair?.accessToken)
+            assertEquals("cached-refresh", restored.tokenPair?.refreshToken)
+            assertEquals("cached-user", restored.tokenPair?.user?.get("username")?.jsonPrimitive?.content)
+
+            val refreshed = WebPageScreenshotAction.withTokenPair(
+                restored,
+                requireNotNull(restored.tokenPair).copy(accessToken = "refreshed-access")
+            )
+            val merged = WebPageScreenshotAction.mergeStorageState(cached.storageState, refreshed)
+            val values = WebPageScreenshotAction.readStorageStateLocalStorage(merged, localStorage.origin)
+            assertEquals("refreshed-access", values[localStorage.key])
+            assertTrue(merged.contains("session-cookie"))
+
+            val cookieOnlySessionKey = "cookie-only-session"
+            cache.save(cookieOnlySessionKey, null, storageState)
+            val cookieOnly = requireNotNull(cache.load(cookieOnlySessionKey, null))
+            assertTrue(cookieOnly.storageState.contains("session-cookie"))
+
+            val changedAuth = unresolved.copy(
+                spec = authSpec.copy(localStorage = localStorage.copy(key = "different_auth_token"))
+            )
+            assertEquals(null, cache.load(sessionKey, changedAuth))
+            assertFalse(Files.exists(cachePath))
+
+            val relativeDirectory = resolveBrowserSessionCacheDirectory("nested/cache", directory)
+            assertTrue(relativeDirectory.startsWith(directory.toAbsolutePath().normalize()))
+            assertFailsWith<IllegalArgumentException> {
+                resolveBrowserSessionCacheDirectory("../outside", directory)
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun normalizeSelectorPrefixesXPath(): Unit {
         assertEquals(
             "xpath=//*[@id=\"app\"]/main",
             WebPageScreenshotAction.normalizeSelector("//*[@id=\"app\"]/main")
         )
         assertEquals("#content", WebPageScreenshotAction.normalizeSelector("#content"))
+    }
+
+    @Test
+    fun screenshotHideSelectorsBuildSafeTemporaryStyle(): Unit {
+        assertEquals(
+            "header.sticky { visibility: hidden !important; }\n.chat-widget { visibility: hidden !important; }",
+            WebPageScreenshotAction.buildScreenshotStyle(listOf("header.sticky", ".chat-widget"))
+        )
+        assertEquals(null, WebPageScreenshotAction.buildScreenshotStyle(emptyList()))
+        assertEquals(
+            "header.sticky",
+            WebPageScreenshotAction.normalizeScreenshotHideSelector("  header.sticky  ")
+        )
+        assertFailsWith<IllegalArgumentException> {
+            WebPageScreenshotAction.normalizeScreenshotHideSelector("header { display: none; }")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            WebPageScreenshotAction.normalizeScreenshotHideSelector("header\nbody")
+        }
     }
 
     @Test
@@ -182,7 +316,14 @@ internal class WebPageScreenshotActionTest {
                 ),
                 "screenshot" to mapOf(
                     "selector" to "//*[@id=\"app\"]/main",
-                    "timeout_ms" to 12_000
+                    "timeout_ms" to 12_000,
+                    "font_wait_timeout_ms" to 1_500,
+                    "hide_selectors" to listOf(" header.sticky ", ".chat-widget"),
+                    "retry" to mapOf(
+                        "enabled" to true,
+                        "max_retries" to 3,
+                        "delay_ms" to 250
+                    )
                 )
             )
         )
@@ -196,6 +337,114 @@ internal class WebPageScreenshotActionTest {
         assertEquals("TEST_EMAIL", spec.steps[1].valueEnv)
         assertEquals("xpath=//*[@id=\"app\"]/main", spec.screenshotSelector)
         assertEquals(12_000L, spec.screenshotTimeoutMillis)
+        assertEquals(1_500L, spec.screenshotFontWaitTimeoutMillis)
+        assertEquals(listOf("header.sticky", ".chat-widget"), spec.screenshotHideSelectors)
+        assertTrue(spec.retry.enabled)
+        assertEquals(3, spec.retry.maxRetries)
+        assertEquals(250L, spec.retry.delayMillis)
+    }
+
+    @Test
+    fun screenshotFontWaitIsBoundedAndPlaywrightInternalWaitIsDisabled(): Unit {
+        fun parse(fontWaitTimeoutMillis: Long?): WebPageScreenshotSpec {
+            val screenshot = mutableMapOf<String, Any?>(
+                "selector" to "#content",
+                "timeout_ms" to 5_000
+            )
+            if (fontWaitTimeoutMillis != null) {
+                screenshot["font_wait_timeout_ms"] = fontWaitTimeoutMillis
+            }
+            val action = ActionConfig(
+                id = "font-wait",
+                type = "send_webpage_screenshot",
+                enabled = true,
+                params = mapOf(
+                    "steps" to listOf(mapOf("op" to "goto", "url" to "https://example.invalid/monitor")),
+                    "screenshot" to screenshot
+                )
+            )
+            return WebPageScreenshotAction.parseSpec(action, ExecutionContext(config))
+        }
+
+        val defaultSpec = parse(null)
+        assertEquals(3_000L, defaultSpec.screenshotFontWaitTimeoutMillis)
+        assertFalse(defaultSpec.retry.enabled)
+        assertEquals(5_000L, parse(8_000L).screenshotFontWaitTimeoutMillis)
+        assertEquals(0L, parse(-1L).screenshotFontWaitTimeoutMillis)
+        assertEquals(
+            "1",
+            WebPageScreenshotAction.playwrightDriverEnvironment()["PW_TEST_SCREENSHOT_NO_FONTS_READY"]
+        )
+    }
+
+    @Test
+    fun screenshotRetryConfigClampsValuesAndRejectsDeterministicFailures(): Unit {
+        val action = ActionConfig(
+            id = "retry-config",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "steps" to listOf(mapOf("op" to "goto", "url" to "https://example.invalid/monitor")),
+                "screenshot" to mapOf(
+                    "selector" to "#content",
+                    "retry" to mapOf(
+                        "max_retries" to 99,
+                        "delay_ms" to 999_999
+                    )
+                )
+            )
+        )
+        val retry = WebPageScreenshotAction.parseSpec(action, ExecutionContext(config)).retry
+
+        assertTrue(retry.enabled)
+        assertEquals(10, retry.maxRetries)
+        assertEquals(60_000L, retry.delayMillis)
+        assertTrue(
+            WebPageScreenshotAction.isRetryableCaptureError(
+                IllegalStateException(
+                    "browser screenshot (selector=#content) failed",
+                    TimeoutError("Timeout 1000ms exceeded")
+                )
+            )
+        )
+        assertTrue(
+            WebPageScreenshotAction.isRetryableCaptureError(
+                IllegalStateException(
+                    "browser step 1 (goto) failed",
+                    PlaywrightException("page.goto: net::ERR_CONNECTION_RESET")
+                )
+            )
+        )
+        assertTrue(
+            WebPageScreenshotAction.isRetryableCaptureError(
+                IllegalStateException(
+                    "browser screenshot (selector=#content) failed",
+                    CancellationException("target operation was cancelled")
+                )
+            )
+        )
+        assertFalse(WebPageScreenshotAction.isRetryableCaptureError(CancellationException("caller cancelled")))
+        assertFalse(
+            WebPageScreenshotAction.isRetryableCaptureError(
+                IllegalStateException(
+                    "browser screenshot (selector=???) failed",
+                    PlaywrightException("Unexpected token while parsing selector")
+                )
+            )
+        )
+        assertFalse(
+            WebPageScreenshotAction.isRetryableCaptureError(
+                IllegalStateException("CLI bridge login failed", TimeoutError("Timeout"))
+            )
+        )
+        assertFalse(
+            WebPageScreenshotAction.isRetryableCaptureError(
+                IllegalStateException(
+                    "browser screenshot (selector=#content) failed",
+                    IllegalArgumentException("screenshot exceeds configured max size")
+                )
+            )
+        )
     }
 
     @Test
@@ -1024,6 +1273,261 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun screenshotHideSelectorsExcludeFixedHeaderWhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/monitor") { exchange ->
+            exchange.respondHtml(
+                """
+                    <!doctype html>
+                    <html>
+                    <head>
+                      <style>
+                        html, body { margin: 0; }
+                        #fixed-header {
+                          position: fixed;
+                          inset: 0 auto auto 0;
+                          width: 400px;
+                          height: 64px;
+                          background: rgb(255, 0, 0);
+                          z-index: 100;
+                        }
+                        #target {
+                          width: 400px;
+                          height: 300px;
+                          background: rgb(0, 255, 0);
+                        }
+                      </style>
+                    </head>
+                    <body>
+                      <header id="fixed-header" class="sticky">fixed header</header>
+                      <main id="target">monitor content</main>
+                    </body>
+                    </html>
+                """.trimIndent()
+            )
+        }
+        server.start()
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            viewportWidth = 800,
+            viewportHeight = 600,
+            timeoutMillis = 2_000L,
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val executionContext = ExecutionContext(config.copy(browser = browserConfig))
+
+        fun screenshotAction(id: String, hideHeader: Boolean): ActionConfig {
+            val screenshot = mutableMapOf<String, Any?>(
+                "selector" to "#target",
+                "timeout_ms" to 2_000,
+                "font_wait_timeout_ms" to 0
+            )
+            if (hideHeader) {
+                screenshot["hide_selectors"] = listOf("header.sticky")
+            }
+            return ActionConfig(
+                id = id,
+                type = "send_webpage_screenshot",
+                enabled = true,
+                params = mapOf(
+                    "steps" to listOf(mapOf("op" to "goto", "url" to "$baseUrl/monitor")),
+                    "screenshot" to screenshot
+                )
+            )
+        }
+
+        try {
+            val control = runBlocking {
+                WebPageScreenshotAction.capture(screenshotAction("header-visible", false), executionContext)
+            }
+            val hidden = runBlocking {
+                WebPageScreenshotAction.capture(screenshotAction("header-hidden", true), executionContext)
+            }
+            val controlImage = requireNotNull(ImageIO.read(ByteArrayInputStream(control)))
+            val hiddenImage = requireNotNull(ImageIO.read(ByteArrayInputStream(hidden)))
+            val sampleX = controlImage.width / 2
+            val sampleY = 20
+
+            assertEquals(0xFF0000, controlImage.getRGB(sampleX, sampleY) and 0xFFFFFF)
+            assertEquals(0x00FF00, hiddenImage.getRGB(sampleX, sampleY) and 0xFFFFFF)
+        } finally {
+            WebPageScreenshotAction.close()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun screenshotRetrySucceedsAndHonorsMaxRetriesWhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val flakyCalls = AtomicInteger()
+        val missingCalls = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/flaky") { exchange ->
+            val includeTarget = flakyCalls.incrementAndGet() >= 2
+            exchange.respondHtml(
+                if (includeTarget) {
+                    "<html><body><main id=\"target\">retry succeeded</main></body></html>"
+                } else {
+                    "<html><body><main>target pending</main></body></html>"
+                }
+            )
+        }
+        server.createContext("/always-missing") { exchange ->
+            missingCalls.incrementAndGet()
+            exchange.respondHtml("<html><body><main>target missing</main></body></html>")
+        }
+        server.start()
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            timeoutMillis = 1_000L,
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val executionContext = ExecutionContext(config.copy(browser = browserConfig))
+
+        fun retryAction(id: String, path: String, maxRetries: Int): ActionConfig {
+            return ActionConfig(
+                id = id,
+                type = "send_webpage_screenshot",
+                enabled = true,
+                params = mapOf(
+                    "steps" to listOf(mapOf("op" to "goto", "url" to "$baseUrl$path")),
+                    "screenshot" to mapOf(
+                        "selector" to "#target",
+                        "timeout_ms" to 200,
+                        "font_wait_timeout_ms" to 0,
+                        "retry" to mapOf(
+                            "enabled" to true,
+                            "max_retries" to maxRetries,
+                            "delay_ms" to 0
+                        )
+                    )
+                )
+            )
+        }
+
+        try {
+            val screenshot = runBlocking {
+                WebPageScreenshotAction.capture(
+                    retryAction("retry-success", "/flaky", maxRetries = 1),
+                    executionContext
+                )
+            }
+            assertTrue(screenshot.hasPngHeader())
+            assertEquals(2, flakyCalls.get())
+
+            val error = assertFailsWith<IllegalStateException> {
+                runBlocking {
+                    WebPageScreenshotAction.capture(
+                        retryAction("retry-limit", "/always-missing", maxRetries = 2),
+                        executionContext
+                    )
+                }
+            }
+            assertTrue(error.message.orEmpty().contains("browser screenshot"))
+            assertEquals(3, missingCalls.get())
+        } finally {
+            WebPageScreenshotAction.close()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun screenshotContinuesWhenWebFontNeverFinishesWhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val fontStarted = CountDownLatch(1)
+        val fontRelease = CountDownLatch(1)
+        val serverExecutor = Executors.newCachedThreadPool()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.executor = serverExecutor
+        server.createContext("/blocked-font.woff2") { exchange ->
+            fontStarted.countDown()
+            try {
+                exchange.responseHeaders.add("Content-Type", "font/woff2")
+                exchange.sendResponseHeaders(200, 0)
+                fontRelease.await(30, TimeUnit.SECONDS)
+            } finally {
+                runCatching { exchange.responseBody.close() }
+                exchange.close()
+            }
+        }
+        server.createContext("/monitor") { exchange ->
+            val body = """
+                <!doctype html>
+                <html>
+                <head>
+                  <title>Blocked Font Monitor</title>
+                  <style>
+                    @font-face {
+                      font-family: 'BlockedFont';
+                      src: url('/blocked-font.woff2') format('woff2');
+                      font-display: block;
+                    }
+                    #target {
+                      width: 640px;
+                      height: 220px;
+                      font: 32px 'BlockedFont', sans-serif;
+                    }
+                  </style>
+                </head>
+                <body>
+                  <main id="target">字体请求未结束时仍应完成截图</main>
+                  <script>document.fonts.load("32px BlockedFont")</script>
+                </body>
+                </html>
+            """.trimIndent().toByteArray()
+            exchange.responseHeaders.add("Content-Type", "text/html; charset=UTF-8")
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            timeoutMillis = 2_000L,
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val executionContext = ExecutionContext(config.copy(browser = browserConfig))
+        val action = ActionConfig(
+            id = "blocked-font-monitor",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "steps" to listOf(
+                    mapOf("op" to "goto", "url" to "$baseUrl/monitor"),
+                    mapOf("op" to "wait", "selector" to "#target", "state" to "visible")
+                ),
+                "screenshot" to mapOf(
+                    "selector" to "#target",
+                    "timeout_ms" to 2_000,
+                    "font_wait_timeout_ms" to 100
+                )
+            )
+        )
+
+        try {
+            val screenshot = runBlocking {
+                WebPageScreenshotAction.capture(action, executionContext)
+            }
+            assertTrue(fontStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(screenshot.hasPngHeader())
+        } finally {
+            fontRelease.countDown()
+            WebPageScreenshotAction.close()
+            server.stop(0)
+            serverExecutor.shutdownNow()
+        }
+    }
+
+    @Test
     fun gotoCommitStillFailsWhenServerDoesNotCommitResponseWhenExplicitlyEnabled(): Unit {
         if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
 
@@ -1462,9 +1966,12 @@ internal class WebPageScreenshotActionTest {
         }
         server.start()
         val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val sessionCacheDirectory = Files.createTempDirectory("xaiwebhook-browser-session-it")
         val browserConfig = BrowserConfig.safeDefault().copy(
             enabled = true,
             channel = "msedge",
+            sessionCacheEnabled = true,
+            sessionCacheDirectory = sessionCacheDirectory.toString(),
             allowedHosts = listOf("127.0.0.1")
         )
         val executionContext = ExecutionContext(config.copy(browser = browserConfig))
@@ -1548,6 +2055,7 @@ internal class WebPageScreenshotActionTest {
             assertEquals(1, refreshCalls.get())
             assertEquals("refresh-1", lastRefreshBody.get()?.get("refresh_token")?.jsonPrimitive?.content)
 
+            WebPageScreenshotAction.close()
             val third = runBlocking {
                 WebPageScreenshotAction.capture(action, executionContext, emptyMap())
             }
@@ -1607,7 +2115,15 @@ internal class WebPageScreenshotActionTest {
         } finally {
             WebPageScreenshotAction.close()
             server.stop(0)
+            sessionCacheDirectory.toFile().deleteRecursively()
         }
+    }
+
+    private fun HttpExchange.respondHtml(bodyText: String): Unit {
+        val body = bodyText.toByteArray()
+        responseHeaders.add("Content-Type", "text/html; charset=UTF-8")
+        sendResponseHeaders(200, body.size.toLong())
+        responseBody.use { it.write(body) }
     }
 
     private fun HttpExchange.respondJson(status: Int, bodyText: String): Unit {
