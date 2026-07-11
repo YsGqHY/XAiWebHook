@@ -36,6 +36,6 @@ $RECYCLE.BIN/
 local.properties
 
 # Runtime configs may contain real tokens and private QQ IDs.
-config/
-data/
+/config/
+/data/
 /.narrafork
