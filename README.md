@@ -1,5 +1,9 @@
 # XAiWebHook
 
+| 赞助商 | 说明 |
+| --- | --- |
+| <a href="https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor"><img src="docs/assets/sponsors/geek2api-wordmark-340x108.jpg" width="170" alt="Geek2API 赞助商标识"></a> | **[Geek2API 企业级人工智能中转站](https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor)**<br>感谢 Geek2API 赞助本项目！高校和企业都在选择的超低倍率中转站，支持 **Claude**/GPT/Gemini/Image2 全模型接入，全站超低倍率，并可开具发票。欢迎[立即体验](https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor)。 |
+
 XAiWebHook 是一个 [mirai-console](https://github.com/mamoe/mirai) Kotlin 插件，通过一份 YAML 完成 WebHook 的双向配置：
 
 - Incoming：外部 HTTP 请求触发机器人动作（发送群/好友消息、网页截图、转发 HTTP、执行命令、返回自定义响应）。
