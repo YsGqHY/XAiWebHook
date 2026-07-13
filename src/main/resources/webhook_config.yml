@@ -62,7 +62,6 @@ browser:
   allowed_hosts:
     - "hk.geek2api.com"
     - "hk2.geek2api.com"
-    - "hk3.geek2api.com"
     - "hk4.geek2api.com"
     - "hk5.geek2api.com"
   # 单张截图最大字节数，默认 10485760（10 MiB），范围 1024-52428800
@@ -248,9 +247,17 @@ actions:
   geek2api-monitor-screenshot:
     type: "send_webpage_screenshot"
     # 默认关闭；启用前需同时设置 browser.enabled: true，并确保 mirai 所在系统可打开默认浏览器
-    enabled: false
+    enabled: true
     # 登录会话复用键；相同键复用 token/Cookie/localStorage，开启 browser.session_cache_enabled 后可跨 reload/重启恢复
     session_key: "geek2api-monitor"
+    # Geek2Api base URL candidates; the current URL is sticky and switches only after a request/navigation error
+    # URLs using one of these origins keep their path/query and switch to the active candidate origin at runtime
+    # hk5 is primary; hk, hk2 and hk4 are fallbacks; hk3 is expired and not configured
+    base_urls:
+      - "https://hk5.geek2api.com"
+      - "https://hk.geek2api.com"
+      - "https://hk2.geek2api.com"
+      - "https://hk4.geek2api.com"
     # incoming 可通过请求体指定群号；outgoing 中变量为空时自动回退到触发事件所在会话
     group_id: "${request.body.group_id}"
     # incoming 可通过请求体指定好友号；group_id 和 friend_id 不能同时有效
@@ -265,15 +272,15 @@ actions:
     auth:
       cli_bridge:
         # 创建 300 秒桥接会话，请求体固定为 {}
-        start_url: "https://hk3.geek2api.com/api/v1/auth/cli-bridge/start"
+        start_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/start"
         # 系统浏览器授权页；插件只附加 bridge_id，绝不会把 poll_secret 放入 URL
-        browser_url: "https://hk3.geek2api.com/cli-bridge"
+        browser_url: "https://hk5.geek2api.com/cli-bridge"
         # 轮询授权结果，请求体为 bridge_id + poll_secret；token 只会交付一次
-        poll_url: "https://hk3.geek2api.com/api/v1/auth/cli-bridge/poll"
+        poll_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll"
         # 取得 token 后读取当前用户，补齐前端路由守卫要求的 auth_user
-        profile_url: "https://hk3.geek2api.com/api/v1/user/profile"
+        profile_url: "https://hk5.geek2api.com/api/v1/user/profile"
         # access token 临近过期时提交 refresh_token，并覆盖旋转后的 token pair
-        refresh_url: "https://hk3.geek2api.com/api/v1/auth/refresh"
+        refresh_url: "https://hk5.geek2api.com/api/v1/auth/refresh"
         # 轮询间隔默认 2500 毫秒，范围 2000-30000，避免触发 120 次/分钟限流
         poll_interval_ms: 2500
         # 单次授权最多等待 300000 毫秒，且不会超过 start 返回的 expires_in
@@ -285,7 +292,7 @@ actions:
       # 授权成功后按 Geek2Api 前端约定写入四个 localStorage 键
       local_storage:
         # 必须是 browser.allowed_hosts 中的无路径 origin
-        origin: "https://hk3.geek2api.com"
+        origin: "https://hk5.geek2api.com"
         # access_token 写入的键名
         key: "auth_token"
         # access token 前缀，Geek2Api 使用原始 token，因此留空
@@ -300,7 +307,7 @@ actions:
     # 浏览器步骤按顺序执行；四个登录态键会在首次 goto 前注入 Playwright BrowserContext
     steps:
       - op: "goto"
-        url: "https://hk3.geek2api.com/monitor"
+        url: "https://hk5.geek2api.com/monitor"
         # 导航等待阶段，默认 commit；可选 commit/domcontentloaded/load/networkidle
         # commit 只等待服务器开始返回目标文档，页面就绪继续由后续 wait 精确判断，避免 SPA 的 DOMContentLoaded 假超时
         wait_until: "commit"
@@ -309,7 +316,7 @@ actions:
       - op: "wait"
         selector: '//*[@id="app"]/div[2]/div[2]/main'
         state: "visible"
-      # hk3 骨架卡片是 div.animate-pulse；加载完成后会出现真实 button 卡片或合法的 .empty-state
+      # Geek2Api 骨架卡片是 div.animate-pulse；加载完成后会出现真实 button 卡片或合法的 .empty-state
       # 任一完成态可见时，Vue 已结束首次数据加载，骨架分支也已移除
       - op: "wait"
         selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
@@ -322,10 +329,10 @@ actions:
       # Geek2Api 的 AppHeader 是 header.sticky，会在长 main 元素截图滚动时覆盖顶部内容
       hide_selectors: ["header.sticky"]
       # 截图元素等待与截图操作超时，单位毫秒；默认回退 browser.timeout_ms
-      timeout_ms: 30000
+      timeout_ms: 60000
       # 截图前等待网页字体完成加载的最长时间（毫秒）；默认 3000 且不超过 timeout_ms，0 表示不等待
       # 字体请求超时或长期挂起时会使用当前回退字体继续截图，不再让整个截图动作失败
-      font_wait_timeout_ms: 3000
+      font_wait_timeout_ms: 60000
       # 浏览器步骤或截图发生可重试的超时/网络错误时，重新打开 Page 并执行整套 steps + screenshot
       retry:
         # 重试开关；未配置 retry 区块时默认关闭，配置区块后默认 true

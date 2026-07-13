@@ -128,6 +128,7 @@ internal object WebPageScreenshotAction {
     )
 
     internal fun parseSpec(action: ActionConfig, context: ExecutionContext): WebPageScreenshotSpec {
+        val baseUrls = parseBaseUrls(action.params["base_urls"], context, context.config.browser.allowedHosts)
         val rawSteps = action.params["steps"] as? List<*>
             ?: error("steps must be a list")
         require(rawSteps.isNotEmpty()) { "steps must not be empty" }
@@ -178,7 +179,7 @@ internal object WebPageScreenshotAction {
         }
         val sessionKey = renderOptionalString(action.params["session_key"], context)
             ?: action.id?.trim()?.ifBlank { null }
-        val auth = parseAuth(action.params["auth"].asParameterMap(), context)
+        val auth = parseAuth(action.params["auth"].asParameterMap(), context, baseUrls)
         if (auth?.login != null || auth?.cliBridge != null) {
             require(sessionKey != null) {
                 "session auth requires session_key or a named action id"
@@ -187,6 +188,7 @@ internal object WebPageScreenshotAction {
 
         return WebPageScreenshotSpec(
             sessionKey = sessionKey,
+            baseUrls = baseUrls,
             auth = auth,
             steps = steps,
             screenshotSelector = screenshotSelector,
@@ -213,6 +215,20 @@ internal object WebPageScreenshotAction {
     internal fun shouldInjectHeader(url: String, allowedHosts: List<String>): Boolean {
         val host = runCatching { URI(url).host?.lowercase(Locale.ROOT) }.getOrNull() ?: return false
         return allowedHosts.any { pattern -> hostMatches(host, pattern) }
+    }
+
+    internal fun rewriteUrlForBaseUrl(url: String, baseUrls: List<String>, baseUrl: String): String {
+        if (baseUrls.isEmpty()) return url
+        val uri = runCatching { URI(url) }.getOrNull() ?: return url
+        val origin = uriOrigin(uri) ?: return url
+        if (origin !in baseUrls) return url
+        val baseUri = URI(baseUrl)
+        return buildString {
+            append(requireNotNull(uriOrigin(baseUri)) { "base_url must be an http or https origin" })
+            uri.rawPath?.takeIf { it.isNotEmpty() }?.let { path -> append(path) }
+            uri.rawQuery?.let { query -> append('?').append(query) }
+            uri.rawFragment?.let { fragment -> append('#').append(fragment) }
+        }
     }
 
     internal fun normalizeSelector(selector: String): String {
@@ -609,7 +625,11 @@ internal object WebPageScreenshotAction {
         )
     }
 
-    private fun parseAuth(map: Map<String, Any?>, context: ExecutionContext): BrowserAuthSpec? {
+    private fun parseAuth(
+        map: Map<String, Any?>,
+        context: ExecutionContext,
+        baseUrls: List<String>
+    ): BrowserAuthSpec? {
         if (map.isEmpty()) return null
 
         val token = map["token"]?.let { TemplateEngine.renderString(it.toString(), context) }
@@ -748,7 +768,8 @@ internal object WebPageScreenshotAction {
             cookie = cookie,
             bootstrap = bootstrap,
             login = login,
-            cliBridge = cliBridge
+            cliBridge = cliBridge,
+            baseUrls = baseUrls
         )
     }
 
@@ -904,6 +925,64 @@ internal object WebPageScreenshotAction {
         return segments
     }
 
+    private fun parseBaseUrls(value: Any?, context: ExecutionContext, allowedHosts: List<String>): List<String> {
+        return renderStringList(value, context)
+            .map { candidate -> normalizeOrigin(candidate, allowedHosts) }
+            .distinct()
+    }
+
+    private fun WebPageScreenshotSpec.withBaseUrl(baseUrl: String?): WebPageScreenshotSpec {
+        if (baseUrl == null || baseUrls.isEmpty()) return this
+        return copy(
+            auth = auth?.withBaseUrl(baseUrl),
+            steps = steps.map { step -> step.withBaseUrl(baseUrls, baseUrl) }
+        )
+    }
+
+    private fun BrowserAuthSpec.withBaseUrl(baseUrl: String): BrowserAuthSpec {
+        if (baseUrls.isEmpty()) return this
+        return copy(
+            localStorage = localStorage?.copy(
+                origin = rewriteUrlForBaseUrl(localStorage.origin, baseUrls, baseUrl)
+            ),
+            cookie = cookie?.copy(
+                url = rewriteUrlForBaseUrl(cookie.url, baseUrls, baseUrl)
+            ),
+            bootstrap = bootstrap?.copy(
+                url = rewriteUrlForBaseUrl(bootstrap.url, baseUrls, baseUrl)
+            ),
+            login = login?.copy(
+                url = rewriteUrlForBaseUrl(login.url, baseUrls, baseUrl),
+                twoFactorUrl = rewriteUrlForBaseUrl(login.twoFactorUrl, baseUrls, baseUrl),
+                refreshUrl = rewriteUrlForBaseUrl(login.refreshUrl, baseUrls, baseUrl)
+            ),
+            cliBridge = cliBridge?.copy(
+                startUrl = rewriteUrlForBaseUrl(cliBridge.startUrl, baseUrls, baseUrl),
+                browserUrl = rewriteUrlForBaseUrl(cliBridge.browserUrl, baseUrls, baseUrl),
+                pollUrl = rewriteUrlForBaseUrl(cliBridge.pollUrl, baseUrls, baseUrl),
+                profileUrl = rewriteUrlForBaseUrl(cliBridge.profileUrl, baseUrls, baseUrl),
+                refreshUrl = rewriteUrlForBaseUrl(cliBridge.refreshUrl, baseUrls, baseUrl)
+            )
+        )
+    }
+
+    private fun BrowserStep.withBaseUrl(baseUrls: List<String>, baseUrl: String): BrowserStep {
+        return copy(url = url?.let { item -> rewriteUrlForBaseUrl(item, baseUrls, baseUrl) })
+    }
+
+
+    private fun uriOrigin(uri: URI): String? {
+        val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return null
+        if (scheme != "http" && scheme != "https") return null
+        val host = uri.host?.lowercase(Locale.ROOT)?.trimEnd('.') ?: return null
+        return buildString {
+            append(scheme)
+            append("://")
+            append(host)
+            if (uri.port >= 0) append(":${uri.port}")
+        }
+    }
+
     private fun hostMatches(host: String, rawPattern: String): Boolean {
         val pattern = rawPattern.lowercase(Locale.ROOT).trim().trimEnd('.')
         return if (pattern.startsWith("*.")) {
@@ -961,6 +1040,7 @@ internal object WebPageScreenshotAction {
         private val sessions = mutableMapOf<String, BrowserSession>()
         private val authFailures = mutableMapOf<String, AuthFailure>()
         private val pendingCliTokens = mutableMapOf<String, PendingCliTokens>()
+        private val baseUrlCursor = BrowserBaseUrlCursor()
         private var activeConfig: BrowserConfig? = null
         private var playwright: Playwright? = null
         private var browser: Browser? = null
@@ -986,6 +1066,33 @@ internal object WebPageScreenshotAction {
             environment: Map<String, String>
         ): ByteArray {
             val activeBrowser = ensureBrowser(config)
+            val failures = mutableListOf<Pair<String, Throwable>>()
+            orderedBaseUrlCandidates(spec).forEach { baseUrl ->
+                val activeSpec = spec.withBaseUrl(baseUrl)
+                val effectiveSpec = activeSpec.copy(
+                    sessionKey = effectiveSessionKey(activeSpec.sessionKey, baseUrl)
+                )
+                try {
+                    return captureWithResolvedSpec(activeBrowser, config, effectiveSpec, environment)
+                } catch (error: Throwable) {
+                    if (baseUrl == null) throw error
+                    failures += baseUrl to error
+                    rememberBaseUrlFailure(spec, baseUrl)
+                    WebHookDebug.log(
+                        "[XAiWebHook] [browser] base_url $baseUrl failed; " +
+                            "trying next candidate: ${summarizeError(error)}"
+                    )
+                }
+            }
+            throw allBaseUrlsFailed(failures)
+        }
+
+        private fun captureWithResolvedSpec(
+            activeBrowser: Browser,
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            environment: Map<String, String>
+        ): ByteArray {
             val resolvedAuth = spec.auth?.let { resolveAuth(it, environment) }
             val sessionKey = spec.sessionKey
             val session = if (sessionKey == null) {
@@ -1041,6 +1148,33 @@ internal object WebPageScreenshotAction {
                 if (sessionKey == null) {
                     session.close()
                 }
+            }
+        }
+
+        private fun orderedBaseUrlCandidates(spec: WebPageScreenshotSpec): List<String?> {
+            return baseUrlCursor.orderedCandidates(spec.sessionKey, spec.baseUrls)
+        }
+
+        private fun rememberBaseUrlFailure(spec: WebPageScreenshotSpec, baseUrl: String): Unit {
+            baseUrlCursor.rememberFailure(spec.sessionKey, spec.baseUrls, baseUrl)
+        }
+
+        private fun effectiveSessionKey(sessionKey: String?, baseUrl: String?): String? {
+            return when {
+                sessionKey == null -> null
+                baseUrl == null -> sessionKey
+                else -> "$sessionKey@$baseUrl"
+            }
+        }
+
+        private fun allBaseUrlsFailed(failures: List<Pair<String, Throwable>>): Throwable {
+            val (baseUrl, failure) = failures.lastOrNull()
+                ?: return IllegalStateException("all configured base_urls failed")
+            return IllegalStateException(
+                "all configured base_urls failed; last base_url=$baseUrl: ${summarizeError(failure)}",
+                failure
+            ).also { aggregate ->
+                failures.dropLast(1).forEach { (_, item) -> aggregate.addSuppressed(item) }
             }
         }
 
@@ -1679,6 +1813,7 @@ internal object WebPageScreenshotAction {
             sessions.clear()
             authFailures.clear()
             pendingCliTokens.clear()
+            baseUrlCursor.clear()
             runCatching { browser?.close() }
             runCatching { playwright?.close() }
             browser = null
@@ -1705,6 +1840,36 @@ internal object WebPageScreenshotAction {
     }
 }
 
+internal class BrowserBaseUrlCursor {
+    private val cursors = mutableMapOf<String, Int>()
+
+    fun orderedCandidates(sessionKey: String?, baseUrls: List<String>): List<String?> {
+        if (baseUrls.isEmpty()) return listOf(null)
+        val start = (cursors[cursorKey(sessionKey, baseUrls)] ?: 0).floorMod(baseUrls.size)
+        return baseUrls.indices.map { offset -> baseUrls[(start + offset).floorMod(baseUrls.size)] }
+    }
+
+    fun rememberFailure(sessionKey: String?, baseUrls: List<String>, failedBaseUrl: String): Unit {
+        if (baseUrls.isEmpty()) return
+        val index = baseUrls.indexOf(failedBaseUrl)
+        if (index >= 0) {
+            cursors[cursorKey(sessionKey, baseUrls)] = (index + 1).floorMod(baseUrls.size)
+        }
+    }
+
+    fun clear(): Unit {
+        cursors.clear()
+    }
+
+    private fun cursorKey(sessionKey: String?, baseUrls: List<String>): String {
+        return listOf(sessionKey.orEmpty(), baseUrls.joinToString("|")).joinToString("|")
+    }
+
+    private fun Int.floorMod(divisor: Int): Int {
+        return ((this % divisor) + divisor) % divisor
+    }
+}
+
 internal data class WebPageScreenshotSpec(
     val sessionKey: String?,
     val auth: BrowserAuthSpec?,
@@ -1713,7 +1878,8 @@ internal data class WebPageScreenshotSpec(
     val screenshotTimeoutMillis: Long,
     val screenshotFontWaitTimeoutMillis: Long,
     val screenshotHideSelectors: List<String>,
-    val retry: BrowserScreenshotRetry
+    val retry: BrowserScreenshotRetry,
+    val baseUrls: List<String> = emptyList()
 )
 
 internal data class BrowserScreenshotRetry(
@@ -1740,7 +1906,8 @@ internal data class BrowserAuthSpec(
     val cookie: BrowserCookieAuth?,
     val bootstrap: BrowserAuthBootstrap? = null,
     val login: BrowserLoginAuth? = null,
-    val cliBridge: BrowserCliBridgeAuth? = null
+    val cliBridge: BrowserCliBridgeAuth? = null,
+    val baseUrls: List<String> = emptyList()
 )
 
 internal data class BrowserAuthBootstrap(

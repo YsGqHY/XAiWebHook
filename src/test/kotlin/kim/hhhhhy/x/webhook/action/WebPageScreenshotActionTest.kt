@@ -46,6 +46,7 @@ internal class WebPageScreenshotActionTest {
         val browser = root["browser"] as Map<*, *>
         val actions = root["actions"] as Map<*, *>
         val screenshotAction = actions["geek2api-monitor-screenshot"] as Map<*, *>
+        val baseUrls = screenshotAction["base_urls"] as List<*>
         val auth = screenshotAction["auth"] as Map<*, *>
         val cliBridge = auth["cli_bridge"] as Map<*, *>
         val localStorage = auth["local_storage"] as Map<*, *>
@@ -58,12 +59,22 @@ internal class WebPageScreenshotActionTest {
         assertTrue(browser["enabled"] is Boolean)
         assertEquals(false, browser["session_cache_enabled"])
         assertEquals("browser-session-cache", browser["session_cache_dir"])
-        assertTrue("hk3.geek2api.com" in (browser["allowed_hosts"] as List<*>))
-        assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
-        assertEquals("https://hk3.geek2api.com/cli-bridge", cliBridge["browser_url"])
-        assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/poll", cliBridge["poll_url"])
-        assertEquals("https://hk3.geek2api.com/api/v1/user/profile", cliBridge["profile_url"])
-        assertEquals("https://hk3.geek2api.com/api/v1/auth/refresh", cliBridge["refresh_url"])
+        assertTrue("hk5.geek2api.com" in (browser["allowed_hosts"] as List<*>))
+        assertFalse("hk3.geek2api.com" in (browser["allowed_hosts"] as List<*>))
+        assertEquals(
+            listOf(
+                "https://hk5.geek2api.com",
+                "https://hk.geek2api.com",
+                "https://hk2.geek2api.com",
+                "https://hk4.geek2api.com"
+            ),
+            baseUrls
+        )
+        assertEquals("https://hk5.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
+        assertEquals("https://hk5.geek2api.com/cli-bridge", cliBridge["browser_url"])
+        assertEquals("https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll", cliBridge["poll_url"])
+        assertEquals("https://hk5.geek2api.com/api/v1/user/profile", cliBridge["profile_url"])
+        assertEquals("https://hk5.geek2api.com/api/v1/auth/refresh", cliBridge["refresh_url"])
         assertEquals(2500, cliBridge["poll_interval_ms"])
         assertEquals(300000, cliBridge["max_wait_ms"])
         assertEquals(null, auth["login"])
@@ -76,7 +87,7 @@ internal class WebPageScreenshotActionTest {
         assertEquals("visible", readyStep["state"])
         assertEquals(90000, readyStep["timeout_ms"])
         assertEquals(listOf("header.sticky"), screenshot["hide_selectors"])
-        assertEquals(3000, screenshot["font_wait_timeout_ms"])
+        assertEquals(60000, screenshot["font_wait_timeout_ms"])
         assertEquals(true, screenshotRetry["enabled"])
         assertEquals(2, screenshotRetry["max_retries"])
         assertEquals(1000, screenshotRetry["delay_ms"])
@@ -97,6 +108,7 @@ internal class WebPageScreenshotActionTest {
         val outgoing = root["outgoing"] as Map<*, *>
         val actions = root["actions"] as Map<*, *>
         val action = actions["geek2api-monitor-screenshot"] as Map<*, *>
+        val baseUrls = action["base_urls"] as List<*>
         val auth = action["auth"] as Map<*, *>
         val cliBridge = auth["cli_bridge"] as Map<*, *>
         val localStorage = auth["local_storage"] as Map<*, *>
@@ -109,10 +121,21 @@ internal class WebPageScreenshotActionTest {
         assertEquals(true, browser["enabled"])
         assertEquals(true, browser["session_cache_enabled"])
         assertEquals("browser-session-cache", browser["session_cache_dir"])
-        assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
-        assertEquals("https://hk3.geek2api.com/cli-bridge", cliBridge["browser_url"])
-        assertEquals("https://hk3.geek2api.com/api/v1/auth/cli-bridge/poll", cliBridge["poll_url"])
-        assertEquals("https://hk3.geek2api.com/api/v1/user/profile", cliBridge["profile_url"])
+        assertTrue("hk5.geek2api.com" in (browser["allowed_hosts"] as List<*>))
+        assertFalse("hk3.geek2api.com" in (browser["allowed_hosts"] as List<*>))
+        assertEquals(
+            listOf(
+                "https://hk5.geek2api.com",
+                "https://hk.geek2api.com",
+                "https://hk2.geek2api.com",
+                "https://hk4.geek2api.com"
+            ),
+            baseUrls
+        )
+        assertEquals("https://hk5.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
+        assertEquals("https://hk5.geek2api.com/cli-bridge", cliBridge["browser_url"])
+        assertEquals("https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll", cliBridge["poll_url"])
+        assertEquals("https://hk5.geek2api.com/api/v1/user/profile", cliBridge["profile_url"])
         assertEquals(120, cliBridge["refresh_before_expiry_seconds"])
         assertEquals(60000, cliBridge["retry_cooldown_ms"])
         assertEquals(null, auth["login"])
@@ -134,10 +157,11 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
-    fun cliBridgeDesktopIntegrationDocUsesHk3BaseUrl(): Unit {
+    fun cliBridgeDesktopIntegrationDocUsesHk5BaseUrl(): Unit {
         val document = File("docs/CLI_BRIDGE_DESKTOP_INTEGRATION.md").readText()
 
-        assertTrue(document.contains("https://hk3.geek2api.com"))
+        assertTrue(document.contains("https://hk5.geek2api.com"))
+        assertFalse(document.contains("https://hk3.geek2api.com"))
         assertFalse(document.contains("https://www.geek2api.com"))
     }
 
@@ -261,10 +285,10 @@ internal class WebPageScreenshotActionTest {
     @Test
     fun validateNavigationUrlUsesExplicitHostAllowlist(): Unit {
         val exact = WebPageScreenshotAction.validateNavigationUrl(
-            "https://hk3.geek2api.com/monitor",
-            listOf("hk3.geek2api.com")
+            "https://hk5.geek2api.com/monitor",
+            listOf("hk5.geek2api.com")
         )
-        assertEquals("hk3.geek2api.com", exact.host)
+        assertEquals("hk5.geek2api.com", exact.host)
 
         val wildcard = WebPageScreenshotAction.validateNavigationUrl(
             "https://api.example.invalid/status",
@@ -286,15 +310,71 @@ internal class WebPageScreenshotActionTest {
         }
         assertTrue(
             WebPageScreenshotAction.shouldInjectHeader(
-                "https://hk3.geek2api.com/api/monitor",
-                listOf("hk3.geek2api.com")
+                "https://hk5.geek2api.com/api/monitor",
+                listOf("hk5.geek2api.com")
             )
         )
         assertFalse(
             WebPageScreenshotAction.shouldInjectHeader(
                 "https://cdn.example.invalid/script.js",
-                listOf("hk3.geek2api.com")
+                listOf("hk5.geek2api.com")
             )
+        )
+    }
+
+    @Test
+    fun rewriteUrlForBaseUrlPreservesPathAndLeavesExternalHostsUntouched(): Unit {
+        val baseUrls = listOf(
+            "https://hk5.geek2api.com",
+            "https://hk.geek2api.com",
+            "https://hk2.geek2api.com",
+            "https://hk4.geek2api.com"
+        )
+
+        assertEquals(
+            "https://hk2.geek2api.com/api/v1/user/profile?verbose=1#top",
+            WebPageScreenshotAction.rewriteUrlForBaseUrl(
+                "https://hk5.geek2api.com/api/v1/user/profile?verbose=1#top",
+                baseUrls,
+                "https://hk2.geek2api.com"
+            )
+        )
+        assertEquals(
+            "https://cdn.example.invalid/script.js",
+            WebPageScreenshotAction.rewriteUrlForBaseUrl(
+                "https://cdn.example.invalid/script.js",
+                baseUrls,
+                "https://hk2.geek2api.com"
+            )
+        )
+    }
+
+    @Test
+    fun baseUrlCursorKeepsCurrentUrlUntilFailure(): Unit {
+        val cursor = BrowserBaseUrlCursor()
+        val baseUrls = listOf(
+            "https://hk5.geek2api.com",
+            "https://hk.geek2api.com",
+            "https://hk2.geek2api.com"
+        )
+
+        assertEquals(baseUrls, cursor.orderedCandidates("monitor", baseUrls).filterNotNull())
+        assertEquals(baseUrls, cursor.orderedCandidates("monitor", baseUrls).filterNotNull())
+
+        cursor.rememberFailure("monitor", baseUrls, "https://hk5.geek2api.com")
+        assertEquals(
+            listOf("https://hk.geek2api.com", "https://hk2.geek2api.com", "https://hk5.geek2api.com"),
+            cursor.orderedCandidates("monitor", baseUrls).filterNotNull()
+        )
+        assertEquals(
+            listOf("https://hk.geek2api.com", "https://hk2.geek2api.com", "https://hk5.geek2api.com"),
+            cursor.orderedCandidates("monitor", baseUrls).filterNotNull()
+        )
+
+        cursor.rememberFailure("monitor", baseUrls, "https://hk.geek2api.com")
+        assertEquals(
+            listOf("https://hk2.geek2api.com", "https://hk5.geek2api.com", "https://hk.geek2api.com"),
+            cursor.orderedCandidates("monitor", baseUrls).filterNotNull()
         )
     }
 
@@ -491,6 +571,7 @@ internal class WebPageScreenshotActionTest {
             type = "send_webpage_screenshot",
             enabled = true,
             params = mapOf(
+                "base_urls" to listOf("https://api.example.invalid", "https://api2.example.invalid"),
                 "auth" to mapOf(
                     "token_env" to "MONITOR_ACCESS_TOKEN",
                     "header_hosts" to listOf("api.example.invalid"),
@@ -516,7 +597,7 @@ internal class WebPageScreenshotActionTest {
             )
         )
         val browserConfig = BrowserConfig.safeDefault().copy(
-            allowedHosts = listOf("api.example.invalid")
+            allowedHosts = listOf("api.example.invalid", "api2.example.invalid")
         )
 
         val spec = WebPageScreenshotAction.parseSpec(
@@ -525,6 +606,8 @@ internal class WebPageScreenshotActionTest {
         )
 
         val auth = requireNotNull(spec.auth)
+        assertEquals(listOf("https://api.example.invalid", "https://api2.example.invalid"), spec.baseUrls)
+        assertEquals(spec.baseUrls, auth.baseUrls)
         assertEquals("MONITOR_ACCESS_TOKEN", auth.tokenEnv)
         assertEquals("Authorization", auth.headerName)
         assertEquals("Bearer ", auth.headerPrefix)

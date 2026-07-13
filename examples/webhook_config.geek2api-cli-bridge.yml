@@ -58,9 +58,12 @@ browser:
   session_cache_enabled: true
   # 相对路径基于插件配置目录，默认 browser-session-cache
   session_cache_dir: "browser-session-cache"
-  # 只允许访问列出的主页面域名
+  # 只允许访问列出的主页面域名；hk5 为主用，hk/hk2/hk4 为备用
   allowed_hosts:
-    - "hk3.geek2api.com"
+    - "hk5.geek2api.com"
+    - "hk.geek2api.com"
+    - "hk2.geek2api.com"
+    - "hk4.geek2api.com"
   # 单张图片最大 10 MiB
   max_screenshot_bytes: 10485760
 
@@ -167,6 +170,14 @@ actions:
     # 相同 session_key 复用 token/Cookie/localStorage；缓存有效时可跨 reload、停服和进程重启恢复
     session_key: "geek2api-monitor"
 
+    # 同一 Geek2Api 站点的候选基址；当前 URL 成功时保持使用，请求/导航失败时才切换到下一个
+    # hk5 为主用，hk、hk2、hk4 为备用；hk3 服务器已到期，不再配置
+    base_urls:
+      - "https://hk5.geek2api.com"
+      - "https://hk.geek2api.com"
+      - "https://hk2.geek2api.com"
+      - "https://hk4.geek2api.com"
+
     # incoming 从请求体读取目标；outgoing 中变量为空，会自动回退到触发会话
     group_id: "${request.body.group_id}"
     friend_id: "${request.body.friend_id}"
@@ -180,15 +191,15 @@ actions:
     auth:
       cli_bridge:
         # 创建会话，请求体为 {}
-        start_url: "https://hk3.geek2api.com/api/v1/auth/cli-bridge/start"
+        start_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/start"
         # 插件只附加 bridge_id；poll_secret 仅保存在本次调用内存中
-        browser_url: "https://hk3.geek2api.com/cli-bridge"
+        browser_url: "https://hk5.geek2api.com/cli-bridge"
         # 每 2.5 秒轮询一次，请求体为 {bridge_id, poll_secret}
-        poll_url: "https://hk3.geek2api.com/api/v1/auth/cli-bridge/poll"
+        poll_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll"
         # token 交付后读取用户对象，写入 auth_user
-        profile_url: "https://hk3.geek2api.com/api/v1/user/profile"
+        profile_url: "https://hk5.geek2api.com/api/v1/user/profile"
         # access token 临近过期时刷新并覆盖旋转后的 access/refresh token
-        refresh_url: "https://hk3.geek2api.com/api/v1/auth/refresh"
+        refresh_url: "https://hk5.geek2api.com/api/v1/auth/refresh"
         poll_interval_ms: 2500
         max_wait_ms: 300000
         refresh_before_expiry_seconds: 120
@@ -197,7 +208,7 @@ actions:
 
       # 授权成功后写入与 Geek2Api 前端完全相同的 localStorage 登录态
       local_storage:
-        origin: "https://hk3.geek2api.com"
+        origin: "https://hk5.geek2api.com"
         key: "auth_token"
         prefix: ""
         refresh_token_key: "refresh_token"
@@ -207,7 +218,7 @@ actions:
     # 四个登录态键会在首次 goto 前注入 Playwright BrowserContext
     steps:
       - op: "goto"
-        url: "https://hk3.geek2api.com/monitor"
+        url: "https://hk5.geek2api.com/monitor"
         # 默认 commit：目标文档开始返回即进入后续元素等待，避免 SPA 的 DOMContentLoaded 假超时
         # 仍可按需改为 domcontentloaded、load 或 networkidle
         wait_until: "commit"
@@ -217,7 +228,7 @@ actions:
         selector: '//*[@id="app"]/div[2]/div[2]/main'
         state: "visible"
         timeout_ms: 30000
-      # 当前 hk3 的骨架卡片是 div.animate-pulse；完成态为真实 button 卡片或 .empty-state
+      # Geek2Api 骨架卡片是 div.animate-pulse；完成态为真实 button 卡片或 .empty-state
       # 任一完成态出现时，首次 API 加载已经结束，避免截到占位骨架
       - op: "wait"
         selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
