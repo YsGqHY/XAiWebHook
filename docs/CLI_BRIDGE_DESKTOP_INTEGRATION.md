@@ -185,10 +185,27 @@ actions:
 
 ```yaml
 screenshot:
-  selector: '//*[@id="app"]/div[2]/div[2]/main'
+  parts:
+    - id: "keys-overview"
+      url: "https://hk5.geek2api.com/keys"
+      wait_until: "commit"
+      selector: '//*[@id="app"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]'
+    - id: "monitor-status"
+      url: "https://hk5.geek2api.com/monitor"
+      wait_until: "commit"
+      steps:
+        - op: "wait"
+          selector: '//*[@id="app"]/div[2]/div[2]/main'
+          state: "visible"
+      selector: '//*[@id="app"]/div[2]/div[2]/main'
+  # 第一项和后续项在各自导航、steps 完成后都固定等待 3 秒再截图
+  delay_before_ms: 3000
   hide_selectors: ["header.sticky"]
   timeout_ms: 30000
   font_wait_timeout_ms: 3000
+  layout:
+    horizontal_align: "center"
+    gap_px: 0
   retry:
     enabled: true
     max_retries: 2
@@ -197,7 +214,11 @@ screenshot:
 
 Geek2Api 的已登录 `AppLayout` 使用 `header.sticky` 作为顶部 AppHeader。对较高的 `<main>` 执行元素截图时，浏览器滚动会让该 sticky header 覆盖截图顶部；`hide_selectors` 会仅在截图瞬间将它设为不可见，截图后自动恢复，不影响页面登录态或布局。
 
-`max_retries` 是首次失败后的额外重试次数，`2` 表示最多 3 次完整尝试。重试仅覆盖浏览器 step/截图的超时与明确网络瞬断，不会重复执行 CLI Bridge 认证失败、配置错误或图片超限等确定性失败；同名 session 的 token/Cookie 会继续复用。
+`screenshot.parts` 按配置顺序从上到下合成。上例第一项从已登录的 `/keys` 截取运行概览，第二项从 `/monitor` 截取状态区域；每项使用独立 Page，但共享同一 CLI Bridge 登录 BrowserContext。每项 `url` 和 `steps` 中的同源 URL 都随 `base_urls` 切换候选域名，单项还可覆盖公共前置等待、超时、字体等待和隐藏选择器。旧 `prepend_url` / `prepend_selector` 字段已由列表取代。
+
+`delay_before_ms` 在每项 URL 导航和自定义 `steps` 完成后、等待最终 selector 并截图前执行，默认 `0`、范围 `0-300000` 毫秒。配置在 `screenshot` 外层时，第一项和后续项都会等待；任一 part 可用自己的 `delay_before_ms` 覆盖，设为 `0` 可仅跳过该项。固定等待不占用 `timeout_ms`，截图重试会重新执行完整列表及各项等待。
+
+`layout.horizontal_align` 可选 `left`、`center`、`right`，`gap_px` 可在相邻截图之间保留 0-1000 像素透明间距。`max_retries` 是首次失败后的额外重试次数，`2` 表示最多 3 次完整列表尝试。重试仅覆盖浏览器 step/截图的超时与明确网络瞬断，不会重复执行 CLI Bridge 认证失败、配置错误或图片超限等确定性失败；同名 session 的 token/Cookie 会继续复用。
 
 ---
 
