@@ -215,34 +215,40 @@ actions:
         expires_at_key: "token_expires_at"
         user_key: "auth_user"
 
-    # 四个登录态键会在首次 goto 前注入 Playwright BrowserContext
-    steps:
-      - op: "goto"
-        url: "https://hk5.geek2api.com/monitor"
-        # 默认 commit：目标文档开始返回即进入后续元素等待，避免 SPA 的 DOMContentLoaded 假超时
-        # 仍可按需改为 domcontentloaded、load 或 networkidle
-        wait_until: "commit"
-        timeout_ms: 30000
-      # 主区域在骨架屏阶段已经可见，因此还需要继续等待真实监控卡片
-      - op: "wait"
-        selector: '//*[@id="app"]/div[2]/div[2]/main'
-        state: "visible"
-        timeout_ms: 30000
-      # Geek2Api 骨架卡片是 div.animate-pulse；完成态为真实 button 卡片或 .empty-state
-      # 任一完成态出现时，首次 API 加载已经结束，避免截到占位骨架
-      - op: "wait"
-        selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
-        state: "visible"
-        timeout_ms: 90000
-
-    # 截取监控主内容区域
+    # 截图项按列表顺序从上到下合成；每项独立 Page，共享同一登录态
     screenshot:
-      selector: '//*[@id="app"]/div[2]/div[2]/main'
-      # 长 main 截图滚动时隐藏 sticky AppHeader，避免它覆盖截图顶部
+      parts:
+        - id: "keys-overview"
+          enabled: true
+          url: "https://hk5.geek2api.com/keys"
+          wait_until: "commit"
+          selector: '//*[@id="app"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]'
+
+        - id: "monitor-status"
+          enabled: true
+          url: "https://hk5.geek2api.com/monitor"
+          wait_until: "commit"
+          steps:
+            # 主区域在骨架屏阶段已经可见，因此继续等待真实监控卡片或合法空状态
+            - op: "wait"
+              selector: '//*[@id="app"]/div[2]/div[2]/main'
+              state: "visible"
+              timeout_ms: 30000
+            - op: "wait"
+              selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
+              state: "visible"
+              timeout_ms: 90000
+          selector: '//*[@id="app"]/div[2]/div[2]/main'
+
+      # parts 默认值；单项同名字段可覆盖
+      # 每项完成导航和 steps 后、等待 selector 并截图前固定等待 3 秒；第一项同样生效
+      delay_before_ms: 3000
       hide_selectors: ["header.sticky"]
       timeout_ms: 30000
-      # 字体最多等待 3 秒；远程字体卡住时使用回退字体继续截图
       font_wait_timeout_ms: 3000
+      layout:
+        horizontal_align: "center"
+        gap_px: 0
       # 可重试的浏览器超时/网络错误最多额外重试 2 次，共 3 次尝试
       retry:
         enabled: true

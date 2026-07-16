@@ -15,7 +15,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.yaml.snakeyaml.Yaml
+import java.awt.Color
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -50,11 +53,14 @@ internal class WebPageScreenshotActionTest {
         val auth = screenshotAction["auth"] as Map<*, *>
         val cliBridge = auth["cli_bridge"] as Map<*, *>
         val localStorage = auth["local_storage"] as Map<*, *>
-        val steps = screenshotAction["steps"] as List<*>
         val screenshot = screenshotAction["screenshot"] as Map<*, *>
+        val parts = screenshot["parts"] as List<*>
+        val keysPart = parts[0] as Map<*, *>
+        val monitorPart = parts[1] as Map<*, *>
+        val monitorSteps = monitorPart["steps"] as List<*>
+        val readyStep = monitorSteps.last() as Map<*, *>
+        val layout = screenshot["layout"] as Map<*, *>
         val screenshotRetry = screenshot["retry"] as Map<*, *>
-        val gotoStep = steps.first() as Map<*, *>
-        val readyStep = steps.last() as Map<*, *>
 
         assertTrue(browser["enabled"] is Boolean)
         assertEquals(false, browser["session_cache_enabled"])
@@ -82,17 +88,29 @@ internal class WebPageScreenshotActionTest {
         assertEquals("refresh_token", localStorage["refresh_token_key"])
         assertEquals("token_expires_at", localStorage["expires_at_key"])
         assertEquals("auth_user", localStorage["user_key"])
-        assertEquals("commit", gotoStep["wait_until"])
+        assertEquals(null, screenshotAction["steps"])
+        assertEquals(2, parts.size)
+        assertEquals("keys-overview", keysPart["id"])
+        assertEquals("https://hk5.geek2api.com/keys", keysPart["url"])
+        assertEquals(
+            "//*[@id=\"app\"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]",
+            keysPart["selector"]
+        )
+        assertEquals("monitor-status", monitorPart["id"])
+        assertEquals("https://hk5.geek2api.com/monitor", monitorPart["url"])
         assertEquals("wait", readyStep["op"])
         assertEquals("visible", readyStep["state"])
         assertEquals(90000, readyStep["timeout_ms"])
+        assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
+        assertTrue(readyStep["selector"].toString().contains("empty-state"))
+        assertEquals(3000, screenshot["delay_before_ms"])
         assertEquals(listOf("header.sticky"), screenshot["hide_selectors"])
         assertEquals(60000, screenshot["font_wait_timeout_ms"])
+        assertEquals("center", layout["horizontal_align"])
+        assertEquals(0, layout["gap_px"])
         assertEquals(true, screenshotRetry["enabled"])
         assertEquals(2, screenshotRetry["max_retries"])
         assertEquals(1000, screenshotRetry["delay_ms"])
-        assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
-        assertTrue(readyStep["selector"].toString().contains("empty-state"))
     }
 
     @Test
@@ -112,11 +130,14 @@ internal class WebPageScreenshotActionTest {
         val auth = action["auth"] as Map<*, *>
         val cliBridge = auth["cli_bridge"] as Map<*, *>
         val localStorage = auth["local_storage"] as Map<*, *>
-        val steps = action["steps"] as List<*>
         val screenshot = action["screenshot"] as Map<*, *>
+        val parts = screenshot["parts"] as List<*>
+        val keysPart = parts[0] as Map<*, *>
+        val monitorPart = parts[1] as Map<*, *>
+        val monitorSteps = monitorPart["steps"] as List<*>
+        val readyStep = monitorSteps.last() as Map<*, *>
+        val layout = screenshot["layout"] as Map<*, *>
         val screenshotRetry = screenshot["retry"] as Map<*, *>
-        val gotoStep = steps.first() as Map<*, *>
-        val readyStep = steps.last() as Map<*, *>
 
         assertEquals(true, browser["enabled"])
         assertEquals(true, browser["session_cache_enabled"])
@@ -141,19 +162,27 @@ internal class WebPageScreenshotActionTest {
         assertEquals(null, auth["login"])
         assertEquals("auth_token", localStorage["key"])
         assertEquals("auth_user", localStorage["user_key"])
-        assertEquals("commit", gotoStep["wait_until"])
+        assertEquals(null, action["steps"])
         assertEquals(1, (incoming["endpoints"] as List<*>).size)
         assertEquals(2, (outgoing["routes"] as List<*>).size)
-        assertTrue(steps.none { (it as Map<*, *>)["op"] == "fill" })
+        assertEquals(2, parts.size)
+        assertEquals("keys-overview", keysPart["id"])
+        assertEquals("https://hk5.geek2api.com/keys", keysPart["url"])
+        assertEquals("monitor-status", monitorPart["id"])
+        assertEquals("https://hk5.geek2api.com/monitor", monitorPart["url"])
+        assertTrue(monitorSteps.none { (it as Map<*, *>)["op"] == "fill" })
         assertEquals("wait", readyStep["op"])
         assertEquals(90000, readyStep["timeout_ms"])
+        assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
+        assertTrue(readyStep["selector"].toString().contains("empty-state"))
+        assertEquals(3000, screenshot["delay_before_ms"])
         assertEquals(listOf("header.sticky"), screenshot["hide_selectors"])
         assertEquals(3000, screenshot["font_wait_timeout_ms"])
+        assertEquals("center", layout["horizontal_align"])
+        assertEquals(0, layout["gap_px"])
         assertEquals(true, screenshotRetry["enabled"])
         assertEquals(2, screenshotRetry["max_retries"])
         assertEquals(1000, screenshotRetry["delay_ms"])
-        assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
-        assertTrue(readyStep["selector"].toString().contains("empty-state"))
     }
 
     @Test
@@ -283,6 +312,40 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun screenshotPartsHonorConfiguredOrderAlignmentAndGap(): Unit {
+        fun solidPng(width: Int, height: Int, color: Color): ByteArray {
+            val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+            val graphics = image.createGraphics()
+            try {
+                graphics.color = color
+                graphics.fillRect(0, 0, width, height)
+            } finally {
+                graphics.dispose()
+            }
+            return ByteArrayOutputStream().use { output ->
+                assertTrue(ImageIO.write(image, "png", output))
+                output.toByteArray()
+            }
+        }
+
+        val combined = WebPageScreenshotAction.combineScreenshotsVertically(
+            parts = listOf(
+                solidPng(6, 2, Color.RED),
+                solidPng(4, 3, Color.GREEN)
+            ),
+            layout = BrowserScreenshotLayout(horizontalAlign = "right", gapPixels = 2)
+        )
+        val image = requireNotNull(ImageIO.read(ByteArrayInputStream(combined)))
+
+        assertEquals(6, image.width)
+        assertEquals(7, image.height)
+        assertEquals(0xFF0000, image.getRGB(0, 0) and 0xFFFFFF)
+        assertEquals(0, image.getRGB(0, 2) ushr 24)
+        assertEquals(0, image.getRGB(1, 4) ushr 24)
+        assertEquals(0x00FF00, image.getRGB(2, 4) and 0xFFFFFF)
+    }
+
+    @Test
     fun validateNavigationUrlUsesExplicitHostAllowlist(): Unit {
         val exact = WebPageScreenshotAction.validateNavigationUrl(
             "https://hk5.geek2api.com/monitor",
@@ -379,26 +442,52 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
-    fun parseSpecRendersStepsAndScreenshotXPath(): Unit {
+    fun parseSpecRendersOrderedScreenshotPartsAndOverrides(): Unit {
         val action = ActionConfig(
             id = "monitor",
             type = "send_webpage_screenshot",
             enabled = true,
             params = mapOf(
-                "steps" to listOf(
-                    mapOf("op" to "goto", "url" to "https://example.invalid/monitor"),
-                    mapOf(
-                        "op" to "fill",
-                        "selector" to "#email",
-                        "value_env" to "TEST_EMAIL",
-                        "optional" to true
-                    )
-                ),
                 "screenshot" to mapOf(
-                    "selector" to "//*[@id=\"app\"]/main",
                     "timeout_ms" to 12_000,
+                    "delay_before_ms" to 750,
                     "font_wait_timeout_ms" to 1_500,
                     "hide_selectors" to listOf(" header.sticky ", ".chat-widget"),
+                    "layout" to mapOf(
+                        "horizontal_align" to "right",
+                        "gap_px" to 12
+                    ),
+                    "parts" to listOf(
+                        mapOf(
+                            "id" to "keys",
+                            "url" to "https://example.invalid/keys",
+                            "selector" to "//*[@id=\"app\"]/summary",
+                            "timeout_ms" to 8_000,
+                            "delay_before_ms" to 250,
+                            "hide_selectors" to listOf(".keys-only"),
+                            "steps" to listOf(
+                                mapOf("op" to "wait", "selector" to "#ready", "state" to "visible")
+                            )
+                        ),
+                        mapOf(
+                            "id" to "disabled",
+                            "enabled" to false
+                        ),
+                        mapOf(
+                            "id" to "monitor",
+                            "url" to "https://example.invalid/monitor",
+                            "wait_until" to "load",
+                            "selector" to "//*[@id=\"app\"]/main",
+                            "steps" to listOf(
+                                mapOf(
+                                    "op" to "fill",
+                                    "selector" to "#email",
+                                    "value_env" to "TEST_EMAIL",
+                                    "optional" to true
+                                )
+                            )
+                        )
+                    ),
                     "retry" to mapOf(
                         "enabled" to true,
                         "max_retries" to 3,
@@ -409,19 +498,138 @@ internal class WebPageScreenshotActionTest {
         )
 
         val spec = WebPageScreenshotAction.parseSpec(action, ExecutionContext(config))
+        val keys = spec.screenshotParts[0]
+        val monitor = spec.screenshotParts[1]
 
         assertEquals("monitor", spec.sessionKey)
-        assertEquals(2, spec.steps.size)
-        assertEquals("commit", spec.steps[0].waitUntil)
-        assertTrue(spec.steps[1].optional)
-        assertEquals("TEST_EMAIL", spec.steps[1].valueEnv)
-        assertEquals("xpath=//*[@id=\"app\"]/main", spec.screenshotSelector)
-        assertEquals(12_000L, spec.screenshotTimeoutMillis)
-        assertEquals(1_500L, spec.screenshotFontWaitTimeoutMillis)
-        assertEquals(listOf("header.sticky", ".chat-widget"), spec.screenshotHideSelectors)
+        assertEquals(listOf("keys", "monitor"), spec.screenshotParts.map { part -> part.id })
+        assertEquals(1, keys.index)
+        assertEquals("https://example.invalid/keys", keys.steps[0].url)
+        assertEquals("wait", keys.steps[1].op)
+        assertEquals("xpath=//*[@id=\"app\"]/summary", keys.selector)
+        assertEquals(8_000L, keys.timeoutMillis)
+        assertEquals(250L, keys.delayBeforeMillis)
+        assertEquals(1_500L, keys.fontWaitTimeoutMillis)
+        assertEquals(listOf(".keys-only"), keys.hideSelectors)
+        assertEquals(3, monitor.index)
+        assertEquals("https://example.invalid/monitor", monitor.steps[0].url)
+        assertEquals("load", monitor.steps[0].waitUntil)
+        assertTrue(monitor.steps[1].optional)
+        assertEquals("TEST_EMAIL", monitor.steps[1].valueEnv)
+        assertEquals("xpath=//*[@id=\"app\"]/main", monitor.selector)
+        assertEquals(12_000L, monitor.timeoutMillis)
+        assertEquals(750L, monitor.delayBeforeMillis)
+        assertEquals(1_500L, monitor.fontWaitTimeoutMillis)
+        assertEquals(listOf("header.sticky", ".chat-widget"), monitor.hideSelectors)
+        assertEquals("right", spec.screenshotLayout.horizontalAlign)
+        assertEquals(12, spec.screenshotLayout.gapPixels)
         assertTrue(spec.retry.enabled)
         assertEquals(3, spec.retry.maxRetries)
         assertEquals(250L, spec.retry.delayMillis)
+    }
+
+    @Test
+    fun legacySingleScreenshotConfigRemainsSupported(): Unit {
+        val action = ActionConfig(
+            id = "legacy",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "steps" to listOf(mapOf("op" to "goto", "url" to "https://example.invalid/monitor")),
+                "screenshot" to mapOf(
+                    "selector" to "#content",
+                    "timeout_ms" to 5_000,
+                    "delay_before_ms" to 125
+                )
+            )
+        )
+
+        val part = WebPageScreenshotAction.parseSpec(action, ExecutionContext(config)).screenshotParts.single()
+
+        assertEquals("main", part.id)
+        assertEquals("https://example.invalid/monitor", part.steps.single().url)
+        assertEquals("#content", part.selector)
+        assertEquals(5_000L, part.timeoutMillis)
+        assertEquals(125L, part.delayBeforeMillis)
+    }
+
+    @Test
+    fun screenshotPartsRejectAmbiguousAndInvalidConfigurations(): Unit {
+        val validParts = listOf(
+            mapOf(
+                "id" to "one",
+                "url" to "https://example.invalid/one",
+                "selector" to "#one"
+            )
+        )
+        val listAction = ActionConfig(
+            id = "list-validation",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf("screenshot" to mapOf("parts" to validParts))
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            WebPageScreenshotAction.parseSpec(
+                listAction.copy(
+                    params = listAction.params + (
+                        "steps" to listOf(mapOf("op" to "goto", "url" to "https://example.invalid/legacy"))
+                    )
+                ),
+                ExecutionContext(config)
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            WebPageScreenshotAction.parseSpec(
+                listAction.copy(
+                    params = mapOf(
+                        "screenshot" to mapOf(
+                            "parts" to listOf(mapOf("id" to "missing-navigation", "selector" to "#target"))
+                        )
+                    )
+                ),
+                ExecutionContext(config)
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            WebPageScreenshotAction.parseSpec(
+                listAction.copy(
+                    params = mapOf(
+                        "steps" to listOf(mapOf("op" to "goto", "url" to "https://example.invalid/monitor")),
+                        "screenshot" to mapOf(
+                            "selector" to "#target",
+                            "prepend_selector" to "#deprecated"
+                        )
+                    )
+                ),
+                ExecutionContext(config)
+            )
+        }
+    }
+
+    @Test
+    fun screenshotDelayBeforeDefaultsToZeroAndIsBounded(): Unit {
+        fun parse(delayBeforeMillis: Long?): Long {
+            val screenshot = mutableMapOf<String, Any?>("selector" to "#content")
+            if (delayBeforeMillis != null) {
+                screenshot["delay_before_ms"] = delayBeforeMillis
+            }
+            val action = ActionConfig(
+                id = "delay-before",
+                type = "send_webpage_screenshot",
+                enabled = true,
+                params = mapOf(
+                    "steps" to listOf(mapOf("op" to "goto", "url" to "https://example.invalid/monitor")),
+                    "screenshot" to screenshot
+                )
+            )
+            return WebPageScreenshotAction.parseSpec(action, ExecutionContext(config))
+                .screenshotParts.single().delayBeforeMillis
+        }
+
+        assertEquals(0L, parse(null))
+        assertEquals(0L, parse(-1L))
+        assertEquals(300_000L, parse(999_999L))
     }
 
     @Test
@@ -447,10 +655,10 @@ internal class WebPageScreenshotActionTest {
         }
 
         val defaultSpec = parse(null)
-        assertEquals(3_000L, defaultSpec.screenshotFontWaitTimeoutMillis)
+        assertEquals(3_000L, defaultSpec.screenshotParts.single().fontWaitTimeoutMillis)
         assertFalse(defaultSpec.retry.enabled)
-        assertEquals(5_000L, parse(8_000L).screenshotFontWaitTimeoutMillis)
-        assertEquals(0L, parse(-1L).screenshotFontWaitTimeoutMillis)
+        assertEquals(5_000L, parse(8_000L).screenshotParts.single().fontWaitTimeoutMillis)
+        assertEquals(0L, parse(-1L).screenshotParts.single().fontWaitTimeoutMillis)
         assertEquals(
             "1",
             WebPageScreenshotAction.playwrightDriverEnvironment()["PW_TEST_SCREENSHOT_NO_FONTS_READY"]
@@ -546,7 +754,7 @@ internal class WebPageScreenshotActionTest {
         )
 
         val spec = WebPageScreenshotAction.parseSpec(action, ExecutionContext(config))
-        assertEquals("load", spec.steps.single().waitUntil)
+        assertEquals("load", spec.screenshotParts.single().steps.single().waitUntil)
 
         val invalid = action.copy(
             params = action.params + (
@@ -1444,6 +1652,117 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun screenshotPartListWaitsBeforeFirstAndFollowingCapturesWhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/monitor") { exchange ->
+            exchange.respondHtml(
+                """
+                    <!doctype html>
+                    <html>
+                    <head>
+                      <style>
+                        html, body { margin: 0; }
+                        #target { width: 320px; height: 80px; background: rgb(0, 255, 0); }
+                      </style>
+                    </head>
+                    <body>
+                      <main id="target">monitor content</main>
+                      <script>
+                        setTimeout(() => {
+                          document.querySelector('#target').style.background = 'rgb(255, 255, 0)';
+                        }, 400);
+                      </script>
+                    </body>
+                    </html>
+                """.trimIndent()
+            )
+        }
+        server.createContext("/keys") { exchange ->
+            exchange.respondHtml(
+                """
+                    <!doctype html>
+                    <html>
+                    <head>
+                      <style>
+                        html, body { margin: 0; }
+                        #summary { width: 320px; height: 40px; background: rgb(255, 0, 0); }
+                      </style>
+                    </head>
+                    <body>
+                      <section id="summary">keys summary</section>
+                      <script>
+                        setTimeout(() => {
+                          document.querySelector('#summary').style.background = 'rgb(0, 0, 255)';
+                        }, 400);
+                      </script>
+                    </body>
+                    </html>
+                """.trimIndent()
+            )
+        }
+        server.start()
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            viewportWidth = 800,
+            viewportHeight = 600,
+            timeoutMillis = 2_000L,
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val action = ActionConfig(
+            id = "part-list",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "screenshot" to mapOf(
+                    "parts" to listOf(
+                        mapOf(
+                            "id" to "keys",
+                            "url" to "$baseUrl/keys",
+                            "selector" to "#summary"
+                        ),
+                        mapOf(
+                            "id" to "monitor",
+                            "url" to "$baseUrl/monitor",
+                            "delay_before_ms" to 900,
+                            "steps" to listOf(
+                                mapOf("op" to "wait", "selector" to "#target", "state" to "visible")
+                            ),
+                            "selector" to "#target"
+                        )
+                    ),
+                    "layout" to mapOf("horizontal_align" to "center", "gap_px" to 4),
+                    "timeout_ms" to 2_000,
+                    "delay_before_ms" to 700,
+                    "font_wait_timeout_ms" to 0
+                )
+            )
+        )
+
+        try {
+            val bytes = runBlocking {
+                WebPageScreenshotAction.capture(
+                    action,
+                    ExecutionContext(config.copy(browser = browserConfig))
+                )
+            }
+            val image = requireNotNull(ImageIO.read(ByteArrayInputStream(bytes)))
+
+            assertEquals(320, image.width)
+            assertEquals(124, image.height)
+            assertEquals(0x0000FF, image.getRGB(160, 20) and 0xFFFFFF)
+            assertEquals(0, image.getRGB(160, 42) ushr 24)
+            assertEquals(0xFFFF00, image.getRGB(160, 84) and 0xFFFFFF)
+        } finally {
+            WebPageScreenshotAction.close()
+            server.stop(0)
+        }
+    }
+
+    @Test
     fun screenshotRetrySucceedsAndHonorsMaxRetriesWhenExplicitlyEnabled(): Unit {
         if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
 
@@ -1729,7 +2048,7 @@ internal class WebPageScreenshotActionTest {
                 action,
                 ExecutionContext(config.copy(browser = browserConfig))
             )
-            assertEquals("commit", spec.steps.first().waitUntil)
+            assertEquals("commit", spec.screenshotParts.single().steps.first().waitUntil)
 
             val bytes = runBlocking {
                 WebPageScreenshotAction.capture(

@@ -35,6 +35,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.file.Paths
 import java.time.Instant
@@ -44,9 +47,14 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import javax.imageio.ImageIO
 
 internal object WebPageScreenshotAction {
     private const val MAX_STEPS = 32
+    private const val MAX_SCREENSHOT_PARTS = 16
+    private const val MAX_SCREENSHOT_PART_ID_LENGTH = 100
+    private const val MAX_SCREENSHOT_GAP_PIXELS = 1_000
+    private const val MAX_SCREENSHOT_DELAY_BEFORE_MILLIS = 300_000L
     private const val DEFAULT_SCREENSHOT_FONT_WAIT_TIMEOUT_MILLIS = 3_000L
     private const val MAX_SCREENSHOT_HIDE_SELECTORS = 32
     private const val MAX_SCREENSHOT_HIDE_SELECTOR_LENGTH = 500
@@ -56,6 +64,7 @@ internal object WebPageScreenshotAction {
     private const val MAX_SCREENSHOT_RETRY_DELAY_MILLIS = 60_000L
     private const val PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT = "PW_TEST_SCREENSHOT_NO_FONTS_READY"
     private val NAVIGATION_WAIT_UNTIL = setOf("commit", "domcontentloaded", "load", "networkidle")
+    private val SCREENSHOT_HORIZONTAL_ALIGNMENTS = setOf("left", "center", "right")
     private val workerLock = Any()
 
     @Volatile
@@ -129,36 +138,96 @@ internal object WebPageScreenshotAction {
 
     internal fun parseSpec(action: ActionConfig, context: ExecutionContext): WebPageScreenshotSpec {
         val baseUrls = parseBaseUrls(action.params["base_urls"], context, context.config.browser.allowedHosts)
-        val rawSteps = action.params["steps"] as? List<*>
-            ?: error("steps must be a list")
-        require(rawSteps.isNotEmpty()) { "steps must not be empty" }
-        require(rawSteps.size <= MAX_STEPS) { "steps must contain at most $MAX_STEPS entries" }
-
-        val steps = rawSteps.mapIndexed { index, raw ->
-            val map = raw.asParameterMap()
-            require(map.isNotEmpty()) { "step ${index + 1} must be an object" }
-            parseStep(index, map, context)
-        }
         val screenshotMap = action.params["screenshot"].asParameterMap()
-        val screenshotSelector = normalizeSelector(
-            renderRequiredString(screenshotMap["selector"], context, "screenshot.selector")
-        )
-        val screenshotTimeoutMillis = renderLong(
+        require(screenshotMap.isNotEmpty()) { "screenshot must be an object" }
+        require(!screenshotMap.containsKey("prepend_url") && !screenshotMap.containsKey("prepend_selector")) {
+            "screenshot.prepend_url/prepend_selector were replaced by screenshot.parts"
+        }
+
+        val defaultTimeoutMillis = renderLong(
             screenshotMap["timeout_ms"],
             context,
             context.config.browser.timeoutMillis
         ).coerceIn(100L, 300_000L)
-        val screenshotFontWaitTimeoutMillis = renderLong(
+        val defaultDelayBeforeMillis = renderLong(
+            screenshotMap["delay_before_ms"],
+            context,
+            0L
+        ).coerceIn(0L, MAX_SCREENSHOT_DELAY_BEFORE_MILLIS)
+        val defaultFontWaitTimeoutMillis = renderLong(
             screenshotMap["font_wait_timeout_ms"],
             context,
-            minOf(DEFAULT_SCREENSHOT_FONT_WAIT_TIMEOUT_MILLIS, screenshotTimeoutMillis)
-        ).coerceIn(0L, screenshotTimeoutMillis)
-        val screenshotHideSelectors = renderStringList(screenshotMap["hide_selectors"], context)
-            .map(::normalizeScreenshotHideSelector)
-            .distinct()
-        require(screenshotHideSelectors.size <= MAX_SCREENSHOT_HIDE_SELECTORS) {
-            "screenshot.hide_selectors must contain at most $MAX_SCREENSHOT_HIDE_SELECTORS entries"
+            minOf(DEFAULT_SCREENSHOT_FONT_WAIT_TIMEOUT_MILLIS, defaultTimeoutMillis)
+        ).coerceIn(0L, defaultTimeoutMillis)
+        val defaultHideSelectors = parseScreenshotHideSelectors(
+            screenshotMap["hide_selectors"],
+            context,
+            "screenshot.hide_selectors"
+        )
+        val layoutMap = screenshotMap["layout"].asParameterMap()
+        val horizontalAlign = renderOptionalString(layoutMap["horizontal_align"], context)
+            ?.lowercase(Locale.ROOT)
+            ?: "center"
+        require(horizontalAlign in SCREENSHOT_HORIZONTAL_ALIGNMENTS) {
+            "screenshot.layout.horizontal_align must be left, center, or right"
         }
+        val layout = BrowserScreenshotLayout(
+            horizontalAlign = horizontalAlign,
+            gapPixels = renderLong(layoutMap["gap_px"], context, 0L)
+                .coerceIn(0L, MAX_SCREENSHOT_GAP_PIXELS.toLong())
+                .toInt()
+        )
+
+        val screenshotParts = if (screenshotMap.containsKey("parts")) {
+            val topLevelSteps = action.params["steps"]
+            require(topLevelSteps == null || (topLevelSteps is List<*> && topLevelSteps.isEmpty())) {
+                "action.steps cannot be combined with screenshot.parts; move steps into each part"
+            }
+            require(!screenshotMap.containsKey("selector")) {
+                "screenshot.selector cannot be combined with screenshot.parts"
+            }
+            val rawParts = screenshotMap["parts"] as? List<*>
+                ?: error("screenshot.parts must be a list")
+            require(rawParts.isNotEmpty()) { "screenshot.parts must not be empty" }
+            require(rawParts.size <= MAX_SCREENSHOT_PARTS) {
+                "screenshot.parts must contain at most $MAX_SCREENSHOT_PARTS entries"
+            }
+            rawParts.mapIndexedNotNull { index, raw ->
+                val map = raw.asParameterMap()
+                require(map.isNotEmpty()) { "screenshot.parts[${index + 1}] must be an object" }
+                parseScreenshotPart(
+                    index = index,
+                    map = map,
+                    context = context,
+                    defaultTimeoutMillis = defaultTimeoutMillis,
+                    defaultDelayBeforeMillis = defaultDelayBeforeMillis,
+                    defaultFontWaitTimeoutMillis = defaultFontWaitTimeoutMillis,
+                    defaultHideSelectors = defaultHideSelectors
+                )
+            }
+        } else {
+            val steps = parseBrowserSteps(action.params["steps"], context, "steps")
+            require(steps.isNotEmpty()) { "steps must not be empty" }
+            listOf(
+                BrowserScreenshotPart(
+                    index = 1,
+                    id = "main",
+                    steps = steps,
+                    selector = normalizeSelector(
+                        renderRequiredString(screenshotMap["selector"], context, "screenshot.selector")
+                    ),
+                    timeoutMillis = defaultTimeoutMillis,
+                    delayBeforeMillis = defaultDelayBeforeMillis,
+                    fontWaitTimeoutMillis = defaultFontWaitTimeoutMillis,
+                    hideSelectors = defaultHideSelectors
+                )
+            )
+        }
+        require(screenshotParts.isNotEmpty()) { "screenshot.parts must contain at least one enabled entry" }
+        require(screenshotParts.map { part -> part.id }.distinct().size == screenshotParts.size) {
+            "enabled screenshot.parts ids must be unique"
+        }
+
         val retryMap = screenshotMap["retry"].asParameterMap()
         val screenshotRetry = if (retryMap.isEmpty()) {
             BrowserScreenshotRetry.disabled()
@@ -190,13 +259,125 @@ internal object WebPageScreenshotAction {
             sessionKey = sessionKey,
             baseUrls = baseUrls,
             auth = auth,
-            steps = steps,
-            screenshotSelector = screenshotSelector,
-            screenshotTimeoutMillis = screenshotTimeoutMillis,
-            screenshotFontWaitTimeoutMillis = screenshotFontWaitTimeoutMillis,
-            screenshotHideSelectors = screenshotHideSelectors,
+            screenshotParts = screenshotParts,
+            screenshotLayout = layout,
             retry = screenshotRetry
         )
+    }
+
+    private fun parseScreenshotPart(
+        index: Int,
+        map: Map<String, Any?>,
+        context: ExecutionContext,
+        defaultTimeoutMillis: Long,
+        defaultDelayBeforeMillis: Long,
+        defaultFontWaitTimeoutMillis: Long,
+        defaultHideSelectors: List<String>
+    ): BrowserScreenshotPart? {
+        if (!renderBoolean(map["enabled"], context, true)) return null
+
+        val field = "screenshot.parts[${index + 1}]"
+        val id = renderOptionalString(map["id"], context) ?: "part-${index + 1}"
+        require(id.length <= MAX_SCREENSHOT_PART_ID_LENGTH && id.none { it == '\r' || it == '\n' }) {
+            "$field.id must be at most $MAX_SCREENSHOT_PART_ID_LENGTH characters without newlines"
+        }
+        val timeoutMillis = renderLong(map["timeout_ms"], context, defaultTimeoutMillis)
+            .coerceIn(100L, 300_000L)
+        val delayBeforeMillis = renderLong(map["delay_before_ms"], context, defaultDelayBeforeMillis)
+            .coerceIn(0L, MAX_SCREENSHOT_DELAY_BEFORE_MILLIS)
+        val fontWaitTimeoutMillis = renderLong(
+            map["font_wait_timeout_ms"],
+            context,
+            minOf(defaultFontWaitTimeoutMillis, timeoutMillis)
+        ).coerceIn(0L, timeoutMillis)
+        val hideSelectors = if (map.containsKey("hide_selectors")) {
+            parseScreenshotHideSelectors(map["hide_selectors"], context, "$field.hide_selectors")
+        } else {
+            defaultHideSelectors
+        }
+        val url = renderOptionalString(map["url"], context)
+        val waitUntil = renderOptionalString(map["wait_until"], context)
+            ?.lowercase(Locale.ROOT)
+            ?: "commit"
+        require(url != null || !map.containsKey("wait_until")) {
+            "$field.wait_until requires url"
+        }
+        require(waitUntil in NAVIGATION_WAIT_UNTIL) {
+            "$field.wait_until must be commit, domcontentloaded, load, or networkidle"
+        }
+
+        val initialSteps = if (url == null) {
+            emptyList()
+        } else {
+            listOf(
+                parseStep(
+                    index = 0,
+                    map = mapOf(
+                        "op" to "goto",
+                        "url" to url,
+                        "wait_until" to waitUntil,
+                        "timeout_ms" to timeoutMillis
+                    ),
+                    context = context
+                )
+            )
+        }
+        val customSteps = parseBrowserSteps(
+            value = map["steps"],
+            context = context,
+            field = "$field.steps",
+            indexOffset = initialSteps.size
+        )
+        val steps = initialSteps + customSteps
+        require(steps.any { step -> step.op == "goto" }) {
+            "$field must define url or contain a goto step"
+        }
+
+        return BrowserScreenshotPart(
+            index = index + 1,
+            id = id,
+            steps = steps,
+            selector = normalizeSelector(renderRequiredString(map["selector"], context, "$field.selector")),
+            timeoutMillis = timeoutMillis,
+            delayBeforeMillis = delayBeforeMillis,
+            fontWaitTimeoutMillis = fontWaitTimeoutMillis,
+            hideSelectors = hideSelectors
+        )
+    }
+
+    private fun parseBrowserSteps(
+        value: Any?,
+        context: ExecutionContext,
+        field: String,
+        indexOffset: Int = 0
+    ): List<BrowserStep> {
+        val rawSteps: List<*> = when (value) {
+            null -> emptyList<Any?>()
+            is List<*> -> value
+            else -> error("$field must be a list")
+        }
+        require(rawSteps.size + indexOffset <= MAX_STEPS) {
+            "$field must contain at most ${MAX_STEPS - indexOffset} entries"
+        }
+        return rawSteps.mapIndexed { index, raw ->
+            val map = raw.asParameterMap()
+            require(map.isNotEmpty()) { "$field[${index + 1}] must be an object" }
+            parseStep(index + indexOffset, map, context)
+        }
+    }
+
+    private fun parseScreenshotHideSelectors(
+        value: Any?,
+        context: ExecutionContext,
+        field: String
+    ): List<String> {
+        val selectors = renderStringList(value, context)
+            .map(::normalizeScreenshotHideSelector)
+            .distinct()
+        require(selectors.size <= MAX_SCREENSHOT_HIDE_SELECTORS) {
+            "$field must contain at most $MAX_SCREENSHOT_HIDE_SELECTORS entries"
+        }
+        return selectors
     }
 
     internal fun validateNavigationUrl(url: String, allowedHosts: List<String>): URI {
@@ -256,6 +437,51 @@ internal object WebPageScreenshotAction {
     internal fun buildScreenshotStyle(hideSelectors: List<String>): String? {
         return hideSelectors.takeIf { it.isNotEmpty() }
             ?.joinToString("\n") { selector -> "$selector { visibility: hidden !important; }" }
+    }
+
+    internal fun combineScreenshotsVertically(
+        parts: List<ByteArray>,
+        layout: BrowserScreenshotLayout = BrowserScreenshotLayout.default()
+    ): ByteArray {
+        require(parts.isNotEmpty()) { "screenshot parts must not be empty" }
+        if (parts.size == 1) return parts.single()
+
+        val images = parts.mapIndexed { index, bytes ->
+            ByteArrayInputStream(bytes).use { input ->
+                requireNotNull(ImageIO.read(input)) {
+                    "screenshot part ${index + 1} is not a supported image"
+                }
+            }
+        }
+        val width = images.maxOf { image -> image.width }
+        val height = images.fold(0L) { total, image -> total + image.height } +
+            layout.gapPixels.toLong() * (images.size - 1)
+        require(width > 0 && height in 1L..Int.MAX_VALUE.toLong()) {
+            "combined screenshot dimensions are invalid"
+        }
+
+        val combined = BufferedImage(width, height.toInt(), BufferedImage.TYPE_INT_ARGB)
+        val graphics = combined.createGraphics()
+        try {
+            var y = 0
+            images.forEachIndexed { index, image ->
+                val x = when (layout.horizontalAlign) {
+                    "left" -> 0
+                    "right" -> width - image.width
+                    else -> (width - image.width) / 2
+                }
+                graphics.drawImage(image, x, y, null)
+                y += image.height
+                if (index < images.lastIndex) y += layout.gapPixels
+            }
+        } finally {
+            graphics.dispose()
+        }
+
+        return ByteArrayOutputStream().use { output ->
+            check(ImageIO.write(combined, "png", output)) { "PNG image writer is unavailable" }
+            output.toByteArray()
+        }
     }
 
     internal fun isRetryableCaptureError(error: Throwable): Boolean {
@@ -935,7 +1161,7 @@ internal object WebPageScreenshotAction {
         if (baseUrl == null || baseUrls.isEmpty()) return this
         return copy(
             auth = auth?.withBaseUrl(baseUrl),
-            steps = steps.map { step -> step.withBaseUrl(baseUrls, baseUrl) }
+            screenshotParts = screenshotParts.map { part -> part.withBaseUrl(baseUrls, baseUrl) }
         )
     }
 
@@ -966,10 +1192,16 @@ internal object WebPageScreenshotAction {
         )
     }
 
+    private fun BrowserScreenshotPart.withBaseUrl(
+        baseUrls: List<String>,
+        baseUrl: String
+    ): BrowserScreenshotPart {
+        return copy(steps = steps.map { step -> step.withBaseUrl(baseUrls, baseUrl) })
+    }
+
     private fun BrowserStep.withBaseUrl(baseUrls: List<String>, baseUrl: String): BrowserStep {
         return copy(url = url?.let { item -> rewriteUrlForBaseUrl(item, baseUrls, baseUrl) })
     }
-
 
     private fun uriOrigin(uri: URI): String? {
         val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return null
@@ -1110,30 +1342,36 @@ internal object WebPageScreenshotAction {
             }
 
             try {
-                val page = session.context.newPage()
                 return try {
-                    spec.steps.forEach { step -> runStep(page, step, config, environment) }
-                    try {
-                        val target = page.locator(spec.screenshotSelector)
-                        target.waitFor(
-                            Locator.WaitForOptions()
-                                .setState(WaitForSelectorState.VISIBLE)
-                                .setTimeout(spec.screenshotTimeoutMillis.toDouble())
-                        )
-                        waitForFontsBestEffort(page, spec.screenshotFontWaitTimeoutMillis)
-                        val screenshotOptions = Locator.ScreenshotOptions()
-                            .setTimeout(spec.screenshotTimeoutMillis.toDouble())
-                        buildScreenshotStyle(spec.screenshotHideSelectors)?.let { style ->
-                            screenshotOptions.setStyle(style)
+                    val capturedParts = spec.screenshotParts.map { part ->
+                        val page = session.context.newPage()
+                        try {
+                            try {
+                                part.steps.forEach { step -> runStep(page, step, config, environment) }
+                                waitBeforeScreenshot(page, part)
+                                captureScreenshotPart(
+                                    page = page,
+                                    part = part,
+                                    maxScreenshotBytes = config.maxScreenshotBytes
+                                )
+                            } catch (error: Throwable) {
+                                throw screenshotError(page, part, error)
+                            }
+                        } finally {
+                            runCatching { page.close() }
                         }
-                        val bytes = target.screenshot(screenshotOptions)
-                        validateScreenshotSize(bytes.size, config.maxScreenshotBytes)
-                        bytes
+                    }
+                    try {
+                        combineScreenshotsVertically(capturedParts, spec.screenshotLayout).also { bytes ->
+                            validateScreenshotSize(bytes.size, config.maxScreenshotBytes)
+                        }
                     } catch (error: Throwable) {
-                        throw screenshotError(page, spec.screenshotSelector, error)
+                        throw IllegalStateException(
+                            "browser screenshot composition failed: ${summarizeError(error)}",
+                            error
+                        )
                     }
                 } finally {
-                    runCatching { page.close() }
                     if (sessionKey != null) {
                         runCatching { syncTokenPairAuth(session) }
                         persistSessionSafely(config, sessionKey, session)
@@ -1175,6 +1413,36 @@ internal object WebPageScreenshotAction {
                 failure
             ).also { aggregate ->
                 failures.dropLast(1).forEach { (_, item) -> aggregate.addSuppressed(item) }
+            }
+        }
+
+        private fun waitBeforeScreenshot(page: Page, part: BrowserScreenshotPart): Unit {
+            if (part.delayBeforeMillis <= 0L) return
+            WebHookDebug.log(
+                "[XAiWebHook] [browser] waiting ${part.delayBeforeMillis}ms before screenshot part ${part.id}"
+            )
+            page.waitForTimeout(part.delayBeforeMillis.toDouble())
+        }
+
+        private fun captureScreenshotPart(
+            page: Page,
+            part: BrowserScreenshotPart,
+            maxScreenshotBytes: Long
+        ): ByteArray {
+            val target = page.locator(part.selector)
+            target.waitFor(
+                Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(part.timeoutMillis.toDouble())
+            )
+            waitForFontsBestEffort(page, part.fontWaitTimeoutMillis)
+            val screenshotOptions = Locator.ScreenshotOptions()
+                .setTimeout(part.timeoutMillis.toDouble())
+            buildScreenshotStyle(part.hideSelectors)?.let { style ->
+                screenshotOptions.setStyle(style)
+            }
+            return target.screenshot(screenshotOptions).also { bytes ->
+                validateScreenshotSize(bytes.size, maxScreenshotBytes)
             }
         }
 
@@ -1730,9 +1998,13 @@ internal object WebPageScreenshotAction {
             )
         }
 
-        private fun screenshotError(page: Page, selector: String, cause: Throwable): IllegalStateException {
+        private fun screenshotError(
+            page: Page,
+            part: BrowserScreenshotPart,
+            cause: Throwable
+        ): IllegalStateException {
             return IllegalStateException(
-                "browser screenshot (selector=$selector) failed " +
+                "browser screenshot part ${part.index} (id=${part.id}, selector=${part.selector}) failed " +
                     "at ${pageDiagnostic(page)}: ${summarizeError(cause)}",
                 cause
             )
@@ -1873,14 +2145,34 @@ internal class BrowserBaseUrlCursor {
 internal data class WebPageScreenshotSpec(
     val sessionKey: String?,
     val auth: BrowserAuthSpec?,
-    val steps: List<BrowserStep>,
-    val screenshotSelector: String,
-    val screenshotTimeoutMillis: Long,
-    val screenshotFontWaitTimeoutMillis: Long,
-    val screenshotHideSelectors: List<String>,
+    val screenshotParts: List<BrowserScreenshotPart>,
+    val screenshotLayout: BrowserScreenshotLayout,
     val retry: BrowserScreenshotRetry,
     val baseUrls: List<String> = emptyList()
 )
+
+internal data class BrowserScreenshotPart(
+    val index: Int,
+    val id: String,
+    val steps: List<BrowserStep>,
+    val selector: String,
+    val timeoutMillis: Long,
+    val delayBeforeMillis: Long,
+    val fontWaitTimeoutMillis: Long,
+    val hideSelectors: List<String>
+)
+
+internal data class BrowserScreenshotLayout(
+    val horizontalAlign: String,
+    val gapPixels: Int
+) {
+    companion object {
+        fun default(): BrowserScreenshotLayout = BrowserScreenshotLayout(
+            horizontalAlign = "center",
+            gapPixels = 0
+        )
+    }
+}
 
 internal data class BrowserScreenshotRetry(
     val enabled: Boolean,

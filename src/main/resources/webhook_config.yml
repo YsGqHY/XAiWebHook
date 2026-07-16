@@ -304,36 +304,57 @@ actions:
         # profile 用户对象序列化后的键名
         user_key: "auth_user"
     # CLI Bridge 登录在真实系统浏览器完成，可使用账号密码、OAuth、验证码和网页 2FA
-    # 浏览器步骤按顺序执行；四个登录态键会在首次 goto 前注入 Playwright BrowserContext
-    steps:
-      - op: "goto"
-        url: "https://hk5.geek2api.com/monitor"
-        # 导航等待阶段，默认 commit；可选 commit/domcontentloaded/load/networkidle
-        # commit 只等待服务器开始返回目标文档，页面就绪继续由后续 wait 精确判断，避免 SPA 的 DOMContentLoaded 假超时
-        wait_until: "commit"
-        timeout_ms: 30000
-      # 先等待截图主区域挂载；该区域在骨架屏阶段就会出现，不能单独作为加载完成条件
-      - op: "wait"
-        selector: '//*[@id="app"]/div[2]/div[2]/main'
-        state: "visible"
-      # Geek2Api 骨架卡片是 div.animate-pulse；加载完成后会出现真实 button 卡片或合法的 .empty-state
-      # 任一完成态可见时，Vue 已结束首次数据加载，骨架分支也已移除
-      - op: "wait"
-        selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
-        state: "visible"
-        timeout_ms: 90000
+    # 每个截图项使用独立 Page，但共享同一 BrowserContext 中的 Cookie、localStorage 和 token
     screenshot:
-      # 最终元素定位器，支持 CSS 或 XPath
-      selector: '//*[@id="app"]/div[2]/div[2]/main'
-      # 截图瞬间临时隐藏的 CSS selector 列表；不会修改页面，最多 32 项
-      # Geek2Api 的 AppHeader 是 header.sticky，会在长 main 元素截图滚动时覆盖顶部内容
-      hide_selectors: ["header.sticky"]
-      # 截图元素等待与截图操作超时，单位毫秒；默认回退 browser.timeout_ms
+      # 截图项列表，按配置顺序从上到下拼接；默认至少 1 项、最多 16 项
+      # 每项支持 id、enabled、url、wait_until、steps、selector、timeout_ms、delay_before_ms、font_wait_timeout_ms、hide_selectors
+      parts:
+        # 第一项：从 /keys 截取运行概览，放在最终图片顶部
+        - id: "keys-overview"
+          # 单项开关，默认 true；false 时整项跳过，至少需保留一个启用项
+          enabled: true
+          # 可选导航快捷方式；会生成首个 goto 步骤，并随 base_urls 保留路径切换候选域名
+          url: "https://hk5.geek2api.com/keys"
+          # url 导航等待阶段，默认 commit；可选 commit/domcontentloaded/load/networkidle
+          wait_until: "commit"
+          # 最终元素定位器，支持 CSS 或 XPath；截图前会自动等待 visible
+          selector: '//*[@id="app"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]'
+
+        # 第二项：从 /monitor 截取监控状态卡片，拼接在运行概览下方
+        - id: "monitor-status"
+          enabled: true
+          url: "https://hk5.geek2api.com/monitor"
+          wait_until: "commit"
+          # url 导航后按顺序执行的受限步骤，支持 goto/fill/click/wait/wait_url；总计最多 32 步
+          steps:
+            # 主区域在骨架屏阶段已经可见，只用于确认页面挂载
+            - op: "wait"
+              selector: '//*[@id="app"]/div[2]/div[2]/main'
+              state: "visible"
+            # 真实卡片或合法空状态出现时，Vue 已结束首次数据加载
+            - op: "wait"
+              selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
+              state: "visible"
+              timeout_ms: 90000
+          selector: '//*[@id="app"]/div[2]/div[2]/main'
+
+      # 以下四项是所有 parts 的默认值；单项配置同名字段时覆盖默认值
+      # 每项完成 URL 导航和 steps 后、等待 selector 并截图前的固定等待，单位毫秒；默认 0，范围 0-300000
+      # 此处设为 3000，因此第一项和后续项都会等待 3 秒；单项可配置 delay_before_ms: 0 跳过
+      delay_before_ms: 3000
+      # 截图元素等待与截图操作超时，单位毫秒；默认回退 browser.timeout_ms，范围 100-300000
       timeout_ms: 60000
-      # 截图前等待网页字体完成加载的最长时间（毫秒）；默认 3000 且不超过 timeout_ms，0 表示不等待
-      # 字体请求超时或长期挂起时会使用当前回退字体继续截图，不再让整个截图动作失败
+      # 截图前等待网页字体完成加载的最长时间；默认 3000 且不超过 timeout_ms，0 表示不等待
       font_wait_timeout_ms: 60000
-      # 浏览器步骤或截图发生可重试的超时/网络错误时，重新打开 Page 并执行整套 steps + screenshot
+      # 截图瞬间临时隐藏的 CSS selector 列表，最多 32 项；单项可配置自己的列表替换此默认值
+      hide_selectors: ["header.sticky"]
+      # 纵向合成布局；未配置 layout 时默认居中且无间距
+      layout:
+        # 宽度不同时的水平对齐方式：left、center、right，默认 center
+        horizontal_align: "center"
+        # 相邻截图项之间的透明间距像素，默认 0，范围 0-1000
+        gap_px: 0
+      # 任一截图项步骤或截图发生可重试错误时，重新执行完整 parts 列表
       retry:
         # 重试开关；未配置 retry 区块时默认关闭，配置区块后默认 true
         enabled: true
