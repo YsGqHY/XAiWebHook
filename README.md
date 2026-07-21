@@ -2,71 +2,144 @@
 
 | 赞助商 | 说明 |
 | --- | --- |
-| <a href="https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor"><img src="docs/assets/sponsors/geek2api-wordmark-340x108.jpg" width="170" alt="Geek2API 赞助商标识"></a> | **[Geek2API 企业级人工智能中转站](https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor)**<br>感谢 Geek2API 赞助本项目！高校和企业都在选择的超低倍率中转站，支持 **Claude**/GPT/Gemini/Image2 全模型接入，全站超低倍率，并可开具发票。欢迎[立即体验](https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor)。 |
+| <a href="https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor"><img src="docs/assets/sponsors/geek2api-wordmark-340x108.jpg" width="170" alt="Geek2API"></a> | 感谢 [Geek2API](https://www.geek2api.com/?utm_source=fuckclaude&utm_medium=sponsor) 赞助本项目。 |
 
-XAiWebHook 是一个 [mirai-console](https://github.com/mamoe/mirai) Kotlin 插件，通过一份 YAML 完成 WebHook 的双向配置：
+XAiWebHook 是一个 mirai-console Kotlin 插件，通过 `webhook_config.yml` 配置双向 WebHook：
 
-- Incoming：外部 HTTP 请求触发机器人动作（发送群/好友消息、网页截图、转发 HTTP、执行命令、返回自定义响应）。
-- Outgoing：mirai 群聊/好友消息事件按规则匹配后执行 HTTP 转发、网页截图等动作。
+- Incoming：外部 HTTP 请求触发群/好友消息、HTTP 转发、网页截图或自定义响应。
+- Outgoing：群聊和好友消息按规则匹配后执行动作。
+- 模板：支持 `${request...}`、`${event...}`、默认值和基础布尔条件。
+- 管理：支持 `/xwebhook reload` 与 `/xwebhook status`。
 
-所有路由、鉴权、模板、安全策略都写在 `webhook_config.yml`，无需改动源码。
+## 快速开始
 
-## 首期能力边界
+### 环境要求
 
-已支持：
+- JDK 11。
+- mirai-console 2.16.0。
+- 网页截图需要 Microsoft Edge、Chrome 或已安装的 Playwright 浏览器。
 
-- Incoming：Bearer Token 鉴权、自定义 method/path、JSON body 解析、群/好友消息发送、网页元素截图发送、HTTP JSON 响应（reply）。
-- Outgoing：群消息、好友消息事件，按事件类型 / 群号 / 好友号 / 发送者 / 消息文本（contains/startsWith/endsWith/regex）/ 布尔条件匹配，支持个人、管理员、路由全局冷却后执行 `http_request`、`send_webpage_screenshot` 等动作。
-- 表达式模板：变量替换、默认值、字符串函数、基础布尔条件。
-- 命令：`/xwebhook reload`、`/xwebhook status`。
-
-暂未支持（计划中，勿在配置里使用）：HMAC 签名鉴权、成员进退群等非消息事件、At / 引用等完整消息链、HTTP 重试、route test 命令、配置 schema 校验、限流与审计日志。
-
-## 环境要求
-
-- JDK 11（插件 JVM 目标为 Java 11）。
-- mirai-console 2.16.0 运行环境。
-- 使用网页截图动作时需要可用浏览器。Windows 默认示例复用系统 Microsoft Edge；其他环境可配置 Chrome/Edge channel、浏览器可执行路径，或预先安装 Playwright Chromium。
-
-## 构建与安装
-
-使用项目自带的 Gradle wrapper 构建：
+### 构建与安装
 
 ```bash
 # Windows
-./gradlew.bat build
+./gradlew.bat buildPlugin
 
 # Linux / macOS
-./gradlew build
+./gradlew buildPlugin
 ```
 
-如果运行机没有可复用的 Chrome/Edge，可显式安装 Playwright Chromium：
+插件包生成于：
 
-```bash
-# Windows
-./gradlew.bat playwrightInstallChromium
-
-# Linux / macOS
-./gradlew playwrightInstallChromium
+```text
+build/mirai/XAiWebHook-0.2.0.mirai2.jar
 ```
 
-插件运行时不会自动下载浏览器；缺少浏览器时动作会失败并在 `/xwebhook status` 中记录 browser error。
+将 JAR 放入 mirai-console 的 `plugins/` 目录并启动。首次加载会生成：
 
-构建产物位于 `build/mirai/XAiWebHook-0.1.0.mirai2.jar`。将该 jar 放入 mirai-console 的 `plugins/` 目录，然后启动或重启 mirai-console。
-
-## 首次启动与配置文件
-
-插件首次启用时会在配置目录生成默认配置：
-
-```
+```text
 <mirai 根目录>/config/kim.hhhhhy.x.webhook/webhook_config.yml
 ```
 
-默认配置 `server.enabled: true`，监听 `127.0.0.1:18080`，base path 为 `/webhook`，并预置两个 incoming 端点（`/send-group`、`/send-friend`）和两个默认关闭的 outgoing 路由示例。修改配置后执行 `/xwebhook reload` 即可热重载，无需重启 mirai。
+修改配置后执行：
 
-## 配置详解
+```text
+/xwebhook reload
+/xwebhook status
+```
 
-完整结构如下，下表给出每个字段的含义与默认值（默认值来自配置解析逻辑）。
+运行时配置不会因升级 JAR 自动覆盖。新增配置项或示例变更需要手工同步。
+
+### 浏览器安装
+
+Windows 示例默认复用系统 Edge。没有可用 Chrome/Edge 时可安装 Playwright Chromium：
+
+```bash
+./gradlew.bat playwrightInstallChromium
+```
+
+插件运行时不会自动下载浏览器。
+
+## 配置入口
+
+- 默认配置与完整注释：[src/main/resources/webhook_config.yml](src/main/resources/webhook_config.yml)
+- Geek2Api 公共状态页：[examples/webhook_config.geek2api-status.yml](examples/webhook_config.geek2api-status.yml)
+- Geek2Api CLI Bridge 登录：[examples/webhook_config.geek2api-cli-bridge.yml](examples/webhook_config.geek2api-cli-bridge.yml)
+- CLI Bridge 协议与安全说明：[docs/CLI_BRIDGE_DESKTOP_INTEGRATION.md](docs/CLI_BRIDGE_DESKTOP_INTEGRATION.md)
+
+启用配置前至少需要：
+
+1. 替换 `change-me-token` 或 `change-me-incoming-token`。
+2. 替换示例群号、好友号和发送者 QQ。
+3. 只启用实际使用的 endpoint、route 和 action。
+4. 确认 `browser.allowed_hosts` 只包含必要域名。
+
+## Geek2Api 公共状态截图
+
+公共 `/status` 页面无需 Geek2Api 账号或 Access Token。完整示例已经配置：
+
+- `hk → hk2 → hk3 → hk4 → hk5` 五个入口自动 failover。
+- 等待端点测速及渠道卡片或合法空状态加载。
+- 截取完整 `//*[@id="app"]/div[2]/main`。
+- 截图时隐藏 fixed header：`#app header`。
+- 保留 `monitor-status` part ID，供浏览器查询 API 复用。
+
+核心配置：
+
+```yaml
+browser:
+  enabled: true
+  engine: "chromium"
+  channel: "msedge"
+  headless: true
+  session_cache_enabled: false
+  allowed_hosts:
+    - "hk.geek2api.com"
+    - "hk2.geek2api.com"
+    - "hk3.geek2api.com"
+    - "hk4.geek2api.com"
+    - "hk5.geek2api.com"
+
+actions:
+  geek2api-monitor-screenshot:
+    type: "send_webpage_screenshot"
+    enabled: true
+    base_urls:
+      - "https://hk.geek2api.com"
+      - "https://hk2.geek2api.com"
+      - "https://hk3.geek2api.com"
+      - "https://hk4.geek2api.com"
+      - "https://hk5.geek2api.com"
+    group_id: "${request.body.group_id}"
+    friend_id: "${request.body.friend_id}"
+    screenshot:
+      parts:
+        - id: "monitor-status"
+          url: "https://hk.geek2api.com/status"
+          wait_until: "commit"
+          steps:
+            - op: "wait"
+              selector: '//*[@id="app"]/div[2]/main/section[2]/div[2]/div[1]/button'
+              state: "visible"
+              timeout_ms: 60000
+            - op: "wait"
+              selector: '(//*[@id="app"]/div[2]/main/div/div/div/button[1] | //*[@id="app"]/div[2]/main//div[contains(concat(" ", normalize-space(@class), " "), " empty-state ")])[1]'
+              state: "visible"
+              timeout_ms: 60000
+          selector: '//*[@id="app"]/div[2]/main'
+      delay_before_ms: 3000
+      timeout_ms: 60000
+      font_wait_timeout_ms: 3000
+      hide_selectors: ["#app header"]
+      retry:
+        enabled: true
+        max_retries: 2
+        delay_ms: 1000
+```
+
+通过 outgoing 触发时，截图会自动发回当前群或好友。通过 incoming 触发时，请求体必须提供 `group_id` 或 `friend_id`，且不能同时提供两者。
+
+## Incoming 示例
 
 ```yaml
 server:
@@ -74,90 +147,15 @@ server:
   host: "127.0.0.1"
   port: 18080
   base_path: "/webhook"
+
 auth:
   type: "bearer"
-  tokens:
-    - "change-me-token"
+  tokens: ["change-me-token"]
   allow_empty_for_localhost: false
-templates:
-  enable_expressions: true
-  strict_missing_variables: false
-browser:
-  enabled: false
-  engine: "chromium"
-  channel: "msedge"
-  executable_path: ""
-  headless: true
-  viewport_width: 1440
-  viewport_height: 1000
-  timeout_ms: 30000
-  optional_step_timeout_ms: 1000
-  session_cache_enabled: false
-  session_cache_dir: "browser-session-cache"
-  allowed_hosts: []
-  max_screenshot_bytes: 10485760
-security:
-  allow_command_execution: false
-  max_body_bytes: 1048576
-logging:
-  request: true
-  response: true
-  error_stacktrace: true
-incoming:
-  endpoints: []
-outgoing:
-  routes: []
-actions: {}
-```
 
-- `server.enabled`：是否启动 HTTP 服务，默认 `true`。
-- `server.host`：监听地址，默认 `127.0.0.1`（仅本机）。需要接收外部请求时改为 `0.0.0.0`，并务必配置强 token。
-- `server.port`：监听端口，默认 `18080`，取值范围 1-65535。
-- `server.base_path`：所有 incoming 端点的统一前缀，默认 `/webhook`。
-- `auth.type`：鉴权类型，目前仅支持 `bearer`，其它值会导致所有请求被拒。
-- `auth.tokens`：全局 Bearer Token 列表，端点未单独配置 token 时回退到此处。
-- `auth.allow_empty_for_localhost`：默认 `false`。为 `true` 时允许无 token 端点，但仅放行来自回环地址的请求。回环判定包含 IPv4 回环网段 `127.0.0.0/8`（即任意 `127.` 开头地址）、`localhost`，以及 IPv6 回环 `::1` 与其完整展开形式 `0:0:0:0:0:0:0:1`。该判定与启动期 host 校验使用同一套规则。
-- `templates.enable_expressions`：是否启用 `${...}` 表达式，默认 `true`。关闭后模板原样输出。
-- `templates.strict_missing_variables`：默认 `false`。为 `true` 时未解析到的变量保留原始 `${...}` 文本，否则替换为空串。
-- `browser.enabled`：网页截图动作总开关，默认 `false`。
-- `browser.engine`：浏览器引擎，默认 `chromium`，可选 `chromium` / `firefox` / `webkit`。
-- `browser.channel`：浏览器发行通道；Windows 默认示例使用 `msedge`。配置 `executable_path` 时优先使用指定文件。
-- `browser.headless`：是否无界面运行，默认 `true`。
-- `browser.viewport_width` / `browser.viewport_height`：截图浏览器视口，默认 `1440x1000`。
-- `browser.timeout_ms`：导航、元素和动作默认超时，默认 `30000` 毫秒。
-- `browser.optional_step_timeout_ms`：可选登录步骤查找元素的等待时间，默认 `1000` 毫秒。
-- `browser.session_cache_enabled`：是否把命名 `session_key` 的 Playwright storageState 持久化，默认 `false`。启用后 Cookie、localStorage 和刷新令牌可跨 `/xwebhook reload`、停服及进程重启恢复。
-- `browser.session_cache_dir`：缓存目录，默认 `browser-session-cache`。相对路径基于插件配置目录；缓存包含敏感登录态，应限制文件访问权限。
-- `browser.allowed_hosts`：允许主页面导航的域名白名单，支持精确域名和 `*.example.com` 子域通配；为空时拒绝所有网页导航。
-- `browser.max_screenshot_bytes`：单张截图最大字节数，默认 `10485760`（10 MiB）。
-- `security.allow_command_execution`：全局命令执行开关，默认 `false`。
-- `security.max_body_bytes`：incoming 请求体最大字节数，默认 `1048576`（1 MiB），`0` 表示不限制。超限返回 413。
-- `logging.request` / `logging.response`：是否记录请求 / 响应日志，默认均 `true`。
-- `logging.error_stacktrace`：是否记录错误堆栈，默认 `true`。
-
-安全约束（启动期校验）：当存在启用的 incoming 端点且其有效 token 为空、同时 `allow_empty_for_localhost` 为 `false` 时，服务会拒绝启动并记录错误。若 `allow_empty_for_localhost` 为 `true` 但 host 绑定到非回环地址，会输出安全告警。
-
-## Incoming：外部请求触发机器人
-
-端点定义在 `incoming.endpoints` 下，每个端点字段：
-
-- `id`：端点标识，默认 `endpoint-<序号>`。
-- `enabled`：是否启用，默认 `true`。
-- `method`：HTTP 方法，默认 `POST`（自动转大写）。支持 GET/POST/PUT/DELETE/PATCH。
-- `path`：相对 `base_path` 的子路径，默认 `/<id>`。实际访问路径为 `base_path + path`。
-- `tokens`：该端点专属 token 列表，为空则回退 `auth.tokens`。
-- `single_flight`：可选的 actions 动作组互斥配置；未配置时关闭，详见下文。
-- `actions`：命中后依次执行的动作列表。
-
-实际监听路径 = `base_path` + 端点 `path`。例如 `base_path: /webhook` 且端点 `path: /send-group`，则完整路径为 `/webhook/send-group`。
-
-发送群消息示例配置：
-
-```yaml
 incoming:
   endpoints:
     - id: "send-group"
-      enabled: true
       method: "POST"
       path: "/send-group"
       actions:
@@ -168,121 +166,20 @@ incoming:
           status: 200
           body:
             success: true
-            message: "group message queued"
 ```
 
-调用（替换为真实 token、群号）：
+调用示例：
 
 ```bash
 curl -X POST http://127.0.0.1:18080/webhook/send-group \
   -H "Authorization: Bearer change-me-token" \
   -H "Content-Type: application/json" \
-  -d '{"group_id": 123456789, "message": "hello from webhook"}'
+  -d '{"group_id":123456789,"message":"hello"}'
 ```
 
-成功时返回 reply 指定的状态码与 body：
+端点自己的 `tokens` 为空时会回退到全局 `auth.tokens`。常见状态码：`401` 鉴权失败、`404` 路径或方法不匹配、`409` 动作组忙、`413` 请求体过大、`500` 动作失败。
 
-```json
-{ "success": true, "message": "group message queued" }
-```
-
-关于 reply 与响应规则：
-
-- reply 用于显式控制 HTTP 响应。业务动作（非 reply）全部成功时，由最后一个 reply 接管响应，可返回自定义状态码（含 4xx/5xx）与 body。
-- 任一业务动作失败时，忽略 reply，返回 `500` 与结果摘要，且失败动作的对外 message 统一脱敏为 `action failed`。
-- 没有 reply 且业务全部成功时返回 `200` 与结果摘要。
-
-因此可以用 reply 返回自定义校验失败响应，例如：
-
-```yaml
-- type: "reply"
-  status: 400
-  body:
-    success: false
-    error: "group_id is required"
-```
-
-常见响应状态码：`401` 鉴权失败（缺少或错误的 Bearer Token），`404` 路径或方法未匹配到端点，`409` 同一 actions 动作组仍在执行，`413` 请求体超过 `max_body_bytes`，`500` 业务动作执行失败或内部异常。
-
-## Actions 动作组单飞
-
-incoming endpoint 和 outgoing route 都可在 `actions` 列表旁配置 `single_flight`。未配置该区块时默认关闭；开启后会原子占用动作组，直到列表内全部动作成功、失败或协程取消后释放。占用期间再次触发不会排队，也不会开始任何动作。
-
-```yaml
-single_flight:
-  enabled: true
-  key: "geek2api-monitor-screenshot"
-  notify: true
-  message: "监控截图任务正在执行，请等待完成后再试。"
-actions:
-  - ref: "geek2api-monitor-screenshot"
-```
-
-`enabled` 是总开关，配置区块存在时默认 `true`。`key` 为可选的静态共享键，最长 200 字符且不能含换行；省略时仅当前 endpoint 或 route 按自身 `id` 互斥。多个 endpoint/route 填写完全相同的 `key` 时共享同一执行锁，因此可阻止 incoming、群聊和好友入口同时运行同一任务。
-
-`notify` 默认为 `true`。outgoing 被拦截时向当前群或好友发送渲染后的 `message`；设为 `false` 或使用空消息时静默拦截。incoming 无论 `notify` 如何都会返回 HTTP `409` 与 `{"success":false,"error":"action group busy"}`，仅在 `notify: true` 且消息非空时额外包含自定义 `message`。消息支持当前 `request.*` 或 `event.*` 模板变量。
-
-单飞锁只保存在内存中，但 `/xwebhook reload` 不会提前释放仍在运行的任务；正常完成、动作异常和协程取消均会释放。若底层动作永久不返回，同一 key 会持续被阻止，直到该协程结束或插件进程停止。单飞不提供管理员绕过权限。
-
-## Outgoing：消息事件转发到外部
-
-路由定义在 `outgoing.routes` 下，每个路由字段：
-
-- `id`：路由标识，默认 `route-<序号>`。
-- `enabled`：是否启用，默认 `true`（默认配置中的示例路由为 `false`，启用前请先填好真实 URL）。
-- `events`：匹配的事件类型列表，可选 `group_message`、`friend_message`。为空表示不限事件类型。
-- `groups`：匹配的群号列表。非空时仅群消息且群号命中才匹配。
-- `friends`：匹配的好友号列表。非空时仅好友消息且好友号命中才匹配。
-- `senders`：匹配的发送者 QQ 列表。
-- `message`：消息文本匹配器，含 `contains` / `starts_with` / `ends_with` / `regex` 四类，每类均为列表；所有已配置字段及其列表项之间为「或」关系，任意一项命中即通过文本匹配。无效正则会在加载时被忽略并告警。
-- `condition`：布尔表达式条件，详见模板章节。
-- `single_flight`：可选的 actions 动作组互斥配置；未配置时关闭，可通过共享 key 跨入口互斥。
-- `cooldown`：可选的路由级指令冷却；未配置时不启用，详见下文。
-- `actions`：匹配并通过单飞与冷却检查后执行的动作列表。
-
-路由顶层的 `events`、`groups`、`friends`、`senders`、聚合后的 `message` 与 `condition` 之间是「与」关系：配置了的条件都要满足，未配置（空）的条件跳过。`message` 内部的四类文本规则按「或」关系聚合。例如下列配置会在消息包含“炸了么”，或以“状态检查”/“监控截图”开头时匹配：
-
-```yaml
-message:
-  contains: ["炸了么"]
-  starts_with: ["状态检查", "监控截图"]
-```
-
-### Outgoing 指令冷却
-
-`cooldown` 状态只在内存中保存，并按路由隔离。普通用户使用 `personal_ms`，群管理员/群主或持有 `kim.hhhhhy.x.webhook:admin` 权限的用户使用 `administrator_ms`；两者还会共同受该路由的 `global_ms` 约束。时长范围均为 `0-604800000` 毫秒，`0` 表示关闭对应维度，`administrator_ms` 未配置时继承 `personal_ms`。
-
-```yaml
-outgoing:
-  routes:
-    - id: "monitor-command"
-      events: ["group_message"]
-      message:
-        contains: ["监控截图"]
-      cooldown:
-        enabled: true
-        personal_ms: 60000
-        administrator_ms: 10000
-        global_ms: 5000
-        notify: true
-        message: "指令冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
-      actions:
-        - ref: "geek2api-monitor-screenshot"
-```
-
-启用 `single_flight` 时先尝试占用动作组，再检查 cooldown；因上一任务未完成而被单飞拦截的触发不会消耗冷却。若冷却检查未通过，会立即释放刚取得的单飞锁并发送冷却提示。冷却在动作开始前原子占用，动作后续失败也不会退还本次冷却。若个人/管理员冷却与全局冷却同时生效，提示最长剩余时间。`notify: false` 或空 `message` 可静默拦截。
-
-冷却提示可使用 `${cooldown.routeId}`、`${cooldown.scope}`、`${cooldown.remainingMillis}`、`${cooldown.remainingSeconds}`。其中 `scope` 为 `personal`、`administrator` 或 `global`。
-
-管理员同时拥有 `kim.hhhhhy.x.webhook:cooldown-bypass` 时无视全部冷却，并且不会读取或写入冷却状态。这里的管理员必须是群管理员/群主，或已拥有插件 `admin` 权限；普通成员只授予 `cooldown-bypass` 不生效。群内可通过 mirai-console 权限主体 `m<群号>.<QQ号>` 授权，例如：
-
-```text
-/permission permit m123456789.987654321 kim.hhhhhy.x.webhook:cooldown-bypass
-```
-
-好友消息没有群角色；如需让好友管理员绕过，需先按 mirai-console 权限规则授予插件 `admin`，再授予 `cooldown-bypass`。执行 `/xwebhook reload` 或停止插件会清空全部内存冷却。
-
-群消息转发示例：
+## Outgoing 示例
 
 ```yaml
 outgoing:
@@ -296,285 +193,166 @@ outgoing:
       actions:
         - type: "http_request"
           method: "POST"
-          url: "https://example.invalid/webhook/group-message"
-          headers:
-            Authorization: "Bearer change-me-token"
+          url: "https://example.invalid/webhook"
           body:
-            type: "${event.type}"
-            bot_id: "${event.botId}"
             group_id: "${event.groupId}"
             sender_id: "${event.senderId}"
-            sender_name: "${event.senderName}"
             message: "${event.messageText}"
 ```
 
-当机器人在群 `123456789` 收到含「关键词」的消息时，会向目标 URL 发送上述 JSON。`http_request` 的请求/连接/读取超时分别为 15s / 10s / 15s。
+`events`、`groups`、`friends`、`senders`、`message` 和 `condition` 之间是“与”关系；`message` 内的 `contains`、`starts_with`、`ends_with`、`regex` 之间是“或”关系。
 
-可用的事件变量：`event.type`、`event.botId`、`event.groupId`、`event.friendId`、`event.senderId`、`event.senderName`、`event.messageText`、`event.timestamp`。
+## 核心配置速查
 
-## 网页登录与截图发送
+| 区块 | 用途 |
+| --- | --- |
+| `server` | HTTP 服务地址、端口和路径前缀 |
+| `auth` | Incoming Bearer Token 鉴权 |
+| `templates` | 模板表达式开关与缺失变量策略 |
+| `browser` | 浏览器、超时、白名单和会话缓存 |
+| `incoming.endpoints` | 外部请求入口 |
+| `outgoing.routes` | mirai 消息事件匹配规则 |
+| `actions` | 可复用命名动作 |
+| `security` | 请求体和命令执行安全开关 |
+| `logging` | 请求、响应和错误日志 |
 
-`send_webpage_screenshot` 用 Playwright 执行受限的浏览器步骤，截取 CSS/XPath 对应的网页元素并作为 mirai 图片发送。推荐把动作定义在顶层 `actions`，再由 outgoing 消息路由和 incoming endpoint 共同引用。
+支持的动作：
 
-可直接复制为运行时 `webhook_config.yml` 的完整配置位于 [`examples/webhook_config.geek2api-cli-bridge.yml`](examples/webhook_config.geek2api-cli-bridge.yml)，包含系统浏览器 CLI Bridge 授权、token 轮询与刷新、incoming、群聊 outgoing、好友 outgoing、安全和日志配置。
+| 动作 | 说明 |
+| --- | --- |
+| `send_group_message` | 发送群消息 |
+| `send_friend_message` | 发送好友消息 |
+| `http_request` | 发起 HTTP 请求 |
+| `send_webpage_screenshot` | 使用 Playwright 截图并发送图片 |
+| `reply` | 构造 Incoming HTTP 响应 |
+| `execute_command` | 执行 mirai-console 命令，默认禁用 |
 
-Geek2Api 监控页面核心示例（默认配置中也有带完整中文注释的版本）：
-
-```yaml
-browser:
-  enabled: true
-  engine: "chromium"
-  channel: "msedge"
-  headless: true
-  session_cache_enabled: true
-  session_cache_dir: "browser-session-cache"
-  allowed_hosts: ["hk5.geek2api.com", "hk.geek2api.com", "hk2.geek2api.com", "hk4.geek2api.com"]
-
-actions:
-  geek2api-monitor-screenshot:
-    type: "send_webpage_screenshot"
-    enabled: true
-    session_key: "geek2api-monitor"
-    # 当前 URL 成功时保持使用，请求/导航失败时才切换到下一条候选
-    base_urls:
-      - "https://hk5.geek2api.com"
-      - "https://hk.geek2api.com"
-      - "https://hk2.geek2api.com"
-      - "https://hk4.geek2api.com"
-    group_id: "${request.body.group_id}"
-    friend_id: "${request.body.friend_id}"
-    pending_message: "正在获取监控截图；首次使用请在系统浏览器中完成 Geek2Api 授权..."
-    failure_message: "监控页面截图失败，请稍后重试。"
-    auth:
-      cli_bridge:
-        start_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/start"
-        browser_url: "https://hk5.geek2api.com/cli-bridge"
-        poll_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll"
-        profile_url: "https://hk5.geek2api.com/api/v1/user/profile"
-        refresh_url: "https://hk5.geek2api.com/api/v1/auth/refresh"
-        poll_interval_ms: 2500
-        max_wait_ms: 300000
-        refresh_before_expiry_seconds: 120
-        retry_cooldown_ms: 60000
-      local_storage:
-        origin: "https://hk5.geek2api.com"
-        key: "auth_token"
-        refresh_token_key: "refresh_token"
-        expires_at_key: "token_expires_at"
-        user_key: "auth_user"
-    screenshot:
-      # parts 严格按列表顺序从上到下合成；每项使用独立 Page，共享登录态
-      parts:
-        - id: "keys-overview"
-          enabled: true
-          url: "https://hk5.geek2api.com/keys"
-          wait_until: "commit"
-          selector: '//*[@id="app"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]'
-        - id: "monitor-status"
-          enabled: true
-          url: "https://hk5.geek2api.com/monitor"
-          wait_until: "commit"
-          steps:
-            - op: "wait"
-              selector: '//*[@id="app"]/div[2]/div[2]/main'
-              state: "visible"
-            # 主区域在骨架屏阶段已可见，继续等待真实监控卡片或合法空状态
-            - op: "wait"
-              selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
-              state: "visible"
-              timeout_ms: 90000
-          selector: '//*[@id="app"]/div[2]/div[2]/main'
-      # 公共默认值可由任一 part 的同名字段覆盖；第一项也会执行前置等待
-      delay_before_ms: 3000
-      hide_selectors: ["header.sticky"]
-      timeout_ms: 30000
-      font_wait_timeout_ms: 3000
-      layout:
-        horizontal_align: "center"
-        gap_px: 0
-      retry:
-        enabled: true
-        max_retries: 2
-        delay_ms: 1000
-
-outgoing:
-  routes:
-    - id: "geek2api-monitor-command"
-      enabled: true
-      events: ["group_message"]
-      groups: [123456789]
-      message:
-        contains: ["监控截图"]
-      single_flight:
-        enabled: true
-        key: "geek2api-monitor-screenshot"
-        notify: true
-        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
-      cooldown:
-        enabled: true
-        personal_ms: 60000
-        administrator_ms: 10000
-        global_ms: 5000
-        notify: true
-        message: "监控截图指令冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
-      actions:
-        - ref: "geek2api-monitor-screenshot"
-
-incoming:
-  endpoints:
-    - id: "webpage-screenshot"
-      enabled: true
-      method: "POST"
-      path: "/webpage-screenshot"
-      single_flight:
-        enabled: true
-        key: "geek2api-monitor-screenshot"
-        notify: true
-        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
-      actions:
-        - ref: "geek2api-monitor-screenshot"
-        - type: "reply"
-          status: 200
-          body:
-            success: true
-```
-
-CLI Bridge 模式依次执行：`POST /api/v1/auth/cli-bridge/start` 创建 300 秒会话；在 mirai 所在系统的默认浏览器打开 `/cli-bridge?bridge_id=...`；每 2.5 秒向 `POST /api/v1/auth/cli-bridge/poll` 提交 `{bridge_id, poll_secret}`；首次收到 `authorized` 后立即保留一次性交付的 access/refresh token，再用 `GET /api/v1/user/profile` 补齐 `auth_user`。浏览器 URL 只包含公开的 `bridge_id`，`poll_secret` 不会进入 URL、日志、状态命令或聊天消息。
-
-首次授权必须在 `start` 返回的 `expires_in` 内完成，默认上限为 300 秒。登录发生在真实系统浏览器，因此账号密码、Google/GitHub 等快捷登录、验证码和网页 2FA 都由站点正常处理；插件不生成或绕过验证码。`browser.headless` 只控制 Playwright 截图浏览器，不会阻止系统授权浏览器显示。
-
-授权成功后插件在首次导航前写入与 Geek2Api 前端一致的四项 localStorage：`auth_token`、`refresh_token`、`token_expires_at` 和 `auth_user`。access token 临近过期时向 `POST /api/v1/auth/refresh` 提交 `{refresh_token}`，并用旋转后的 access/refresh token 重建 BrowserContext；页面自身若刷新了 localStorage，插件也会同步最新 token。
-
-Geek2Api 监控主区域在 API 数据返回前就会显示六张 `animate-pulse` 骨架卡片，因此只等待主 XPath 可见会过早截图。默认实例会继续等待真实 `button.group.min-h-[280px]` 监控卡片或 `.empty-state` 合法空状态；任一完成态出现时 Vue 已结束首次数据加载，骨架分支也已卸载。生产环境已有运行时 YAML 不会被新 JAR 自动覆盖，需要同步增加这个等待步骤后再执行 `/xwebhook reload`。
-
-`screenshot.parts` 是 1-16 项的截图列表，最终 PNG 严格按列表顺序从上到下合成。每项可配置 `id`、`enabled`、`url`、`wait_until`、`steps`、`selector`、`timeout_ms`、`delay_before_ms`、`font_wait_timeout_ms` 和 `hide_selectors`；`url` 是首个 `goto` 的快捷写法，后续 `steps` 仍只允许受限浏览器操作。每项使用独立 Page，但共享同一 BrowserContext 的 Cookie、localStorage 和 token，因此不同页面不会互相污染导航状态，同时仍复用登录态。默认 Geek2Api 动作第一项截取 `/keys` 运行概览，第二项截取 `/monitor` 监控卡片。
-
-列表外层的 `timeout_ms`、`delay_before_ms`、`font_wait_timeout_ms` 和 `hide_selectors` 是各项默认值，单项配置同名字段时整体覆盖。`screenshot.layout.horizontal_align` 支持 `left`、`center`、`right`，默认 `center`；`layout.gap_px` 控制相邻图片的透明间距，默认 `0`、范围 `0-1000`。为兼容既有通用配置，未使用 `parts` 时仍支持动作级 `steps + screenshot.selector` 单图模式；短期方案中的 `prepend_url` / `prepend_selector` 已废弃，需迁移为两个有序 part。
-
-CLI Bridge 模式必须配置 `session_key`，命名 action 未显式设置时会自动使用 action ID。一次授权失败后默认冷却 60 秒，避免重复调用 start 触发 20 次/分钟限流；普通页面、XPath 或截图失败不会清除有效认证会话。默认情况下 token pair 只保存在插件内存中。启用 `browser.session_cache_enabled` 后，插件会在每次截图及 BrowserWorker 关闭前原子保存 Cookie/localStorage；下次创建同一 `session_key` 时先恢复缓存，临期 token 自动刷新，缓存损坏、配置指纹不匹配或刷新失效时删除缓存并回退到一次正常授权。
-
-旧的 `auth.login` 账号密码/2FA/TOTP 流程，以及 `auth.token` / `auth.token_env`、限定 host 请求头、Cookie 和 `/auth/me` bootstrap 均保留用于已有配置兼容。`token/token_env`、`login`、`cli_bridge` 三种认证源必须且只能配置一种；默认示例改用 CLI Bridge，不再受纯 email/password 请求的 `CAP_VERIFICATION_FAILED` 阻断。
-
-outgoing 触发时，未显式配置有效 `group_id` / `friend_id` 会自动把截图发回当前群或好友。incoming 没有事件会话，请求体必须提供其中一个目标，例如 `{"group_id": 123456789}`。两个目标不能同时有效。
-
-浏览器步骤支持：`goto` 访问 URL；`fill` 填写输入框；`click` 点击元素；`wait` 等待 `visible` / `attached` / `hidden` / `detached`；`wait_url` 等待 URL 匹配。步骤最多 32 个，不支持执行自定义 JavaScript。若使用网页表单登录并依赖 Cookie 缓存，应把仅登录页存在的 `fill` / `click` 步骤设为 `optional: true`，缓存会话已登录时自动跳过。
-
-`goto.wait_until` 控制 Playwright 导航等待阶段，可选 `commit`、`domcontentloaded`、`load`、`networkidle`，默认 `commit`。每个 part 的 `url + wait_until` 会生成同等的首个 `goto` 步骤。`commit` 只要求目标服务器已开始返回文档，DNS、连接、TLS、无响应或未提交导航仍会正常超时失败；页面是否真正可截图由后续 `wait` 和该项 `selector` 精确验证。对于会持续请求、重定向或延迟触发生命周期事件的 SPA，不建议把 `domcontentloaded` / `networkidle` 当作业务就绪条件。
-
-`screenshot.delay_before_ms` 是每个启用 part 在 URL 导航与自定义 `steps` 全部完成后、等待最终 `selector` 并截图前的固定延迟，默认 `0`、范围 `0-300000` 毫秒。外层值对第一项和所有后续项都生效，part 内可用同名字段覆盖，例如第二项设为 `0` 可跳过公共等待。该延迟独立于 `timeout_ms`，会直接增加每次完整列表尝试的总耗时；发生截图重试时，每个 part 会再次执行自己的前置等待。旧的单图模式同样可使用外层 `screenshot.delay_before_ms`。
-
-`screenshot.timeout_ms` 控制各项默认的 URL 快捷导航、目标元素等待与截图操作超时，默认回退 `browser.timeout_ms`；part 内同名字段可覆盖。`screenshot.font_wait_timeout_ms` 控制每项截图前等待网页字体完成加载的最长时间，默认 `3000` 毫秒且不会超过该项 `timeout_ms`，设为 `0` 可直接跳过等待。字体 CDN、代理或网络请求长期挂起时，插件会记录调试日志并使用当前浏览器已渲染的回退字体继续截图。每个 part 和最终合成 PNG 都受 `browser.max_screenshot_bytes` 限制。
-
-`screenshot.hide_selectors` 是所有 parts 默认的临时隐藏 CSS selector 列表，单项可用自己的 `hide_selectors` 完整替换；每个列表最多 32 项。插件为命中元素注入 `visibility: hidden !important`，截图完成后由 Playwright 自动移除样式，不修改页面状态，也不会引发布局重排。该字段只接受 CSS selector，不接受 XPath。Geek2Api 的 AppHeader 为 `header.sticky`，因此默认示例将它加入公共隐藏列表。
-
-`screenshot.retry` 控制失败重试，未配置时默认关闭；配置区块存在时 `enabled` 默认 `true`。`max_retries` 表示首次失败后的最大额外重试次数，默认 `2`、范围 `0-10`，因此 `max_retries: 2` 最多执行 3 次完整的 parts 列表。`delay_ms` 是固定重试间隔，默认 `1000` 毫秒、范围 `0-60000`。每次尝试为每个启用 part 创建新 Page，但继续复用同名 session 的 Cookie/token；pending 消息只发送一次，failure 消息只在所有尝试均失败后发送。仅浏览器 step/截图的超时与明确网络瞬断会重试，认证失败、配置错误、非法 selector、图像合成错误和截图大小超限不会重试。启用动作组 `single_flight` 时锁会覆盖整个重试周期。
-
-相同 `session_key` 会在内存中复用 BrowserContext 和 token pair；每次尝试的每个启用 part 使用独立 Page，并共享该 BrowserContext。启用 `browser.session_cache_enabled` 时，缓存文件写入 `<插件配置目录>/<session_cache_dir>/<session_key 的 SHA-256>.json`，不会把原始 session key 作为路径；旧 `auth.login` 文件模式的邮箱和密码仍只来自 YAML 或环境变量，缓存仅保存浏览器 storageState 与 token 类型。
-
-## 模板表达式
-
-在动作参数的字符串值中使用 `${...}` 引用上下文变量。表达式只做变量替换与基础条件判断，不执行任意脚本。
-
-变量路径（点号逐层取值）：
-
-- Incoming 上下文：`request.method`、`request.path`、`request.query.<名>`、`request.headers.<名>`、`request.body`、`request.body.<字段>`、`request.remoteHost`。
-- Outgoing 上下文：`event.type`、`event.botId`、`event.groupId`、`event.friendId`、`event.senderId`、`event.senderName`、`event.messageText`、`event.timestamp`。
-
-默认值：用 `?:` 提供回退，左侧解析为 null 时取右侧字面量。
-
-```text
-${request.body.message ?: "默认内容"}
-```
-
-字面量：支持双/单引号字符串、`true`/`false`、`null`、整数、浮点数。
-
-布尔条件（用于路由 `condition` 字段）：
-
-- 比较：`==`、`!=`。
-- 逻辑：`&&`、`||`、`!`，支持括号分组。
-- 字符串函数：`contains(a, b)`、`startsWith(a, b)`、`endsWith(a, b)`。
-
-示例：
-
-```yaml
-condition: "contains(${event.messageText}, \"紧急\") && ${event.senderId} != 10000"
-```
-
-行为细节：当 `templates.enable_expressions` 为 `false` 时模板原样输出；未解析到变量时，`strict_missing_variables: true` 保留原始 `${...}` 文本，否则替换为空串。incoming 的 `send_group_message` / `send_friend_message` 中，单个 `${request.body.xxx}` 变量实际内容超过 200 字符时，会在该变量位置渲染为 Markdown 图片消息段，模板中的前后文本仍保留为普通文本。表达式有递归深度上限（32 层）以防止异常嵌套。
-
-## 动作类型参考
-
-每个动作含 `type`、`enabled`（默认 `true`）及各自参数。参数值均支持模板表达式。
-
-- `send_group_message`：发送群消息。参数 `group_id`（必填，需可解析为数字）、`message`（文本）。
-- `send_friend_message`：发送好友消息。参数 `friend_id`（必填，需可解析为数字）、`message`（文本）。
-- `http_request`：发起 HTTP 请求。参数 `url`（必填）、`method`（默认 `POST`）、`headers`（键值对）、`body`（任意结构，序列化为 JSON）。
-- `send_webpage_screenshot`：使用 `screenshot.parts` 按顺序执行多个页面/元素截图并纵向合成为一张 PNG；每项可独立配置 URL、受限浏览器步骤、CSS/XPath、超时、字体等待和隐藏选择器，`layout` 控制水平对齐与间距。未配置 `parts` 时兼容动作级 `steps + screenshot.selector` 单图模式。`auth.cli_bridge` 支持系统浏览器授权、一次性 token 轮询、profile 用户补全、refresh token 轮换和四项 localStorage 登录态；兼容模式仍支持 `auth.login`、AccessToken 请求头、Cookie 与 `auth.bootstrap`。`base_urls` 会重写所有 part 步骤中的同源 URL，命名 `session_key` 可配合 `browser.session_cache_enabled` 持久化登录态，`screenshot.retry` 控制完整列表的重试次数与间隔。
-- `reply`：仅对 incoming 有意义，构造 HTTP 响应。参数 `status`（默认 `200`）、`body`（任意结构）。
-- `execute_command`：以控制台身份执行 mirai 命令。参数 `command`（必填）。默认禁用，需同时满足 `security.allow_command_execution: true` 与该动作 `enabled: true` 才会执行，且每次执行都会记录审计日志。
-
-动作可内联定义，也可在顶层 `actions` 处命名后通过字符串或 `ref` 引用：
+动作可内联，也可在顶层 `actions` 命名后通过 `ref` 引用：
 
 ```yaml
 actions:
   notify-admin:
     type: "send_group_message"
     group_id: 123456789
-    message: "收到 webhook 调用"
+    message: "收到 WebHook"
 
 incoming:
   endpoints:
-    - id: "ping"
-      path: "/ping"
+    - id: "notify"
       actions:
-        - "notify-admin"          # 直接用名称引用
-        - ref: "notify-admin"     # 或用 ref 引用
+        - ref: "notify-admin"
 ```
 
-## 命令参考
+## 模板表达式
 
-命令需要 `kim.hhhhhy.x.webhook:admin` 权限。
+常用上下文：
 
-`/xwebhook reload`：重载 `webhook_config.yml` 并重启 WebHook 服务。回执会显示加载到的 incoming/outgoing 数量与服务状态；若配置解析失败，会提示「已回退安全默认配置」并附带错误摘要，便于第一时间发现 YAML 写错。
+- Incoming：`request.method`、`request.path`、`request.query.*`、`request.headers.*`、`request.body.*`、`request.remoteHost`。
+- Outgoing：`event.type`、`event.botId`、`event.groupId`、`event.friendId`、`event.senderId`、`event.senderName`、`event.messageText`、`event.timestamp`。
+- 冷却提示：`cooldown.routeId`、`cooldown.scope`、`cooldown.remainingMillis`、`cooldown.remainingSeconds`。
 
-`/xwebhook status`：查看服务运行状态、监听地址、端点与路由数量、浏览器 engine/channel，以及最近的配置、服务和浏览器错误。
+```yaml
+message: "${request.body.message ?: \"默认内容\"}"
+condition: "contains(${event.messageText}, \"紧急\") && ${event.senderId} != 10000"
+```
 
-execute_command 动作另有独立权限 `kim.hhhhhy.x.webhook:execute-command`。Outgoing 冷却绕过权限为 `kim.hhhhhy.x.webhook:cooldown-bypass`，且仅对群管理员/群主或插件管理员生效。
+表达式只支持变量替换、默认值、比较、布尔逻辑以及 `contains`、`startsWith`、`endsWith`，不执行任意脚本。
 
-## 安全建议
+## 单飞与冷却
 
-- 生产环境务必替换默认 token `change-me-token`，使用足够长的随机串。
-- 默认仅监听 `127.0.0.1`。需要公网/局域网访问时再改 `host`，并确保所有启用端点都有 token。
-- 不要在绑定非回环地址时开启 `allow_empty_for_localhost`，否则等于暴露未鉴权接口（启动会有安全告警）。
-- `execute_command` 风险高，默认双重关闭；确需使用时再同时打开全局开关与动作开关，并留意审计日志。
-- 按需设置 `max_body_bytes` 限制请求体大小，防止超大请求。
-- 网页截图功能默认关闭。启用后只把必要域名加入 `browser.allowed_hosts`。Geek2Api 默认使用 CLI Bridge，不需要在 YAML 保存账号密码；兼容 `auth.login` 的密码、TOTP 密钥和 Token 仍应限制文件权限或使用环境变量。
-- `send_webpage_screenshot` 不支持自定义 JavaScript。默认浏览器登录态仅在内存中；启用 `browser.session_cache_enabled` 会把 Cookie/localStorage 和刷新令牌写入磁盘，必须保护插件配置目录并避免共享缓存文件。
+`single_flight` 防止同一动作组并发执行。多个入口使用相同 `key` 时共享一把锁：
+
+```yaml
+single_flight:
+  enabled: true
+  key: "geek2api-monitor-screenshot"
+  notify: true
+  message: "截图任务正在执行，请稍后再试。"
+```
+
+Outgoing `cooldown` 支持个人、管理员和路由全局冷却：
+
+```yaml
+cooldown:
+  enabled: true
+  personal_ms: 60000
+  administrator_ms: 10000
+  global_ms: 5000
+  notify: true
+  message: "请在 ${cooldown.remainingSeconds} 秒后重试。"
+```
+
+冷却和单飞状态只保存在内存中。管理员绕过权限为 `kim.hhhhhy.x.webhook:cooldown-bypass`。
+
+## 命令与权限
+
+| 命令 | 说明 |
+| --- | --- |
+| `/xwebhook reload` | 重载 YAML 并重启 WebHook 服务 |
+| `/xwebhook status` | 查看服务、路由、浏览器和最近错误 |
+
+主要权限：
+
+- `kim.hhhhhy.x.webhook:admin`
+- `kim.hhhhhy.x.webhook:execute-command`
+- `kim.hhhhhy.x.webhook:cooldown-bypass`
+
+`execute_command` 必须同时开启 `security.allow_command_execution: true` 和动作自身 `enabled: true`。
+
+## 高级能力
+
+### 受保护页面登录
+
+访问 `/keys`、`/monitor` 等受保护页面时，可使用 CLI Bridge、账号密码兼容模式或静态 Token。推荐阅读：
+
+- [CLI Bridge 完整示例](examples/webhook_config.geek2api-cli-bridge.yml)
+- [CLI Bridge 协议与安全说明](docs/CLI_BRIDGE_DESKTOP_INTEGRATION.md)
+
+启用 `browser.session_cache_enabled` 会把 token pair、Cookie 和 localStorage 写入磁盘。缓存目录必须限制访问权限。
+
+### 浏览器文本查询 API
+
+依赖插件可通过 `kim.hhhhhy.x.webhook.api.XAiWebHookBrowserApi` 复用命名截图动作的导航、认证和 BrowserContext。API 只接收 action、part 和受限 selector，不接收任意 JavaScript、Cookie 或 Token。
+
+公共状态动作的兼容 part ID 为 `monitor-status`。
+
+## 安全边界
+
+- 生产环境必须替换示例 Token。
+- 默认监听 `127.0.0.1`；绑定 `0.0.0.0` 时必须启用强 Token。
+- `allow_empty_for_localhost` 只应在回环监听地址使用。
+- `browser.allowed_hosts` 只配置必要域名。
+- 不要在 YAML 或日志中暴露真实密码、TOTP、Token、Cookie 或 session cache。
+- `send_webpage_screenshot` 不支持任意 JavaScript。
+- `execute_command` 默认双重关闭。
+- 示例群号、好友号和 URL 必须使用占位符后再提交。
 
 ## 故障排查
 
-- 服务未启动：执行 `/xwebhook status` 查看 `server error`。常见原因是启用了无 token 端点而未开启 `allow_empty_for_localhost`，或端口被占用。
-- 请求返回 401：检查 `Authorization: Bearer <token>` 头是否携带且与配置一致。
-- 请求返回 404：确认请求路径等于 `base_path + 端点 path`，且 HTTP 方法与端点 `method` 一致、端点 `enabled` 为 `true`。
-- 请求返回 413：请求体超过 `security.max_body_bytes`，调大限制或减小请求体。
-- 请求返回 500：某个业务动作执行失败（如群号不存在、机器人未登录、目标 URL 不可达）。具体原因见控制台日志，对外响应已脱敏。
-- 网页截图提示失败：执行 `/xwebhook status` 查看 `browser error`，确认 `browser.enabled`、`allowed_hosts`、浏览器 channel/路径和截图 XPath。列表模式错误会包含 part 序号、`id`、selector、最终 URL 与页面标题。系统不会自动下载缺失的 Playwright 浏览器。
-- 配置提示 `prepend_url/prepend_selector were replaced by screenshot.parts`：把原顶部区域和主区域分别改成两个 part，并按期望的上下顺序排列；参考默认 Geek2Api 配置后执行 `/xwebhook reload`。
-- `goto` 报 `waiting until "domcontentloaded"` 超时，但错误中的最终 URL 和标题已是目标页面：升级到包含 `goto.wait_until` 的版本；新版本对未配置该字段的旧 YAML 默认使用 `commit`，无需等待不稳定的 SPA 生命周期事件。后续元素等待仍会阻止未真正加载完成的页面截图。
-- 截图仍是灰色骨架卡片：现有运行时 YAML 可能只有主 `<main>` 的 visible 等待；同步默认实例中的真实监控卡片 XPath 等待步骤，执行 `/xwebhook reload` 后重试。
-- 截图错误 Call log 停在 `waiting for fonts to load...`：升级到包含有界字体等待的版本。默认最多等待 3 秒，超时后使用回退字体继续截图；可通过 `screenshot.font_wait_timeout_ms` 调整，通常不应通过增大整个 `screenshot.timeout_ms` 规避卡住的字体请求。
-- 截图偶发超时或 `net::ERR_*`：在 `screenshot.retry` 中开启重试。控制台会记录每次失败的尝试编号和下次等待时间；达到 `max_retries` 后才发送最终 failure 消息。若每次都在同一个 selector 超时，应先修正页面就绪条件，而不是持续增大重试次数。
-- `CLI bridge could not open the system browser`：mirai 所在系统没有可用桌面浏览器集成；控制台警告会给出只含 `bridge_id` 的安全授权 URL，插件会继续轮询，可在同一桌面环境立即手动打开。
-- `CLI bridge login timed out`：未在 start 返回的有效期内完成浏览器授权；等待 60 秒冷却后重新触发截图。
-- `CLI bridge poll failed: HTTP 400`：桥接会话已过期或 token 已被一次性取走，需要重新 start；不要复用旧 `bridge_id`。
-- `CLI bridge refresh failed`：refresh token 已失效、被重用撤销或接口不可用；对应内存 session 与磁盘缓存会被清理，并在当前触发中回退到一次新的浏览器授权。
-- `CLI bridge retry cooldown active`：上一次授权失败后仍在冷却期；默认最多等待 60 秒，插件不会在 start 的 20 次/分钟限流下循环重试。
-- `credential login failed: HTTP 400 (CAP_VERIFICATION_FAILED...)`：仅适用于旧 `auth.login` 兼容模式；Geek2Api 站点要求网页验证码时，建议改用默认 CLI Bridge。
-- `credential login requires 2FA` / `credential refresh failed`：仅适用于旧账号密码兼容模式，检查 TOTP 环境变量或重新登录。
-- `auth bootstrap failed` / `auth bootstrap response path not found`：仅适用于旧 Token 兼容模式，检查 Token 与 bootstrap JSON 路径。
-- 配置改了不生效：只修改 YAML 时执行 `/xwebhook reload`；修改环境变量后必须重启 mirai-console 进程。
+- 服务未启动：执行 `/xwebhook status`，检查端口占用、Token 和配置解析错误。
+- 请求返回 401：检查 `Authorization: Bearer <token>`。
+- 请求返回 404：检查 `base_path + path` 和 HTTP method。
+- 请求返回 409：同一 `single_flight.key` 的任务仍在执行。
+- 请求返回 413：请求体超过 `security.max_body_bytes`。
+- 网页截图失败：检查 `browser.enabled`、浏览器 channel/路径、`allowed_hosts`、URL 和 selector。
+- 公共状态截图异常：确认 selector 为 `//*[@id="app"]/div[2]/main`，并配置 `hide_selectors: ["#app header"]`。
+- 字体加载卡住：调低 `screenshot.font_wait_timeout_ms`；超时后会使用当前回退字体继续截图。
+- 偶发导航或网络超时：启用 `screenshot.retry`；持续 selector 超时应修正页面就绪条件。
+- CLI Bridge 失败：查看 [CLI Bridge 文档](docs/CLI_BRIDGE_DESKTOP_INTEGRATION.md) 中的错误处理。
+- 配置修改未生效：执行 `/xwebhook reload`；环境变量变化需要重启 mirai-console。
 
+## 开发验证
 
+```bash
+# 普通测试
+./gradlew.bat test
 
+# 真实 Edge 浏览器测试
+XAI_WEBHOOK_BROWSER_IT=true ./gradlew.bat test --tests "kim.hhhhhy.x.webhook.action.WebPageScreenshotActionTest"
 
+# 公共状态页真实截图测试
+XAI_WEBHOOK_GEEK2API_STATUS_IT=true ./gradlew.bat test --tests "kim.hhhhhy.x.webhook.action.WebPageScreenshotActionTest.publicGeek2ApiStatusConfigurationCapturesMainWithoutHeaderWhenExplicitlyEnabled"
 
+# 构建插件包
+./gradlew.bat clean buildPlugin
+```
