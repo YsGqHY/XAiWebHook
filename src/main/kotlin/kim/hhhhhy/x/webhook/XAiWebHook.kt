@@ -1,6 +1,7 @@
 package kim.hhhhhy.x.webhook
 
 import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
+import kim.hhhhhy.x.webhook.action.WebPageScreenshotAction
 import kim.hhhhhy.x.webhook.command.XAiWebHookCommand
 import kim.hhhhhy.x.webhook.config.WebHookConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
@@ -17,7 +18,7 @@ import net.mamoe.mirai.event.GlobalEventChannel.registerListenerHost
 public object XAiWebHook : KotlinPlugin(
     JvmPluginDescription(
         id = "kim.hhhhhy.x.webhook",
-        version = "0.1.0",
+        version = "0.2.0",
         name = "XAiWebHook"
     )
 ) {
@@ -46,6 +47,7 @@ public object XAiWebHook : KotlinPlugin(
     }
 
     public override fun onEnable(): Unit {
+        WebPageScreenshotAction.open()
         WebHookDebug.log("[XAiWebHook] 插件启动中...")
         WebHookDebug.log("[XAiWebHook] 正在加载配置文件...")
         WebHookConfig.load()

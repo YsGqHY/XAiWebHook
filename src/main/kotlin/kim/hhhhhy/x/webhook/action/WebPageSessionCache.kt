@@ -2,10 +2,12 @@ package kim.hhhhhy.x.webhook.action
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
@@ -18,7 +20,8 @@ import java.security.MessageDigest
 
 internal data class CachedBrowserSession(
     val storageState: String,
-    val tokenType: String
+    val tokenType: String,
+    val tokenPair: BrowserTokenPair? = null
 )
 
 internal class BrowserSessionCache(
@@ -31,7 +34,7 @@ internal class BrowserSessionCache(
 
         val envelope = parseObject(Files.readAllBytes(path).toString(StandardCharsets.UTF_8))
         val version = (envelope["version"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
-        require(version == CACHE_VERSION) { "browser session cache version is unsupported" }
+        require(version in SUPPORTED_CACHE_VERSIONS) { "browser session cache version is unsupported" }
 
         val expectedFingerprint = authFingerprint(auth)
         val storedFingerprint = (envelope["auth_fingerprint"] as? JsonPrimitive)?.contentOrNull
@@ -47,7 +50,12 @@ internal class BrowserSessionCache(
             ?.trim()
             ?.ifBlank { null }
             ?: "Bearer"
-        return CachedBrowserSession(storageState.toString(), tokenType)
+        val tokenPair = if (version == CACHE_VERSION) {
+            parseTokenPair(envelope["token_pair"], tokenType)
+        } else {
+            null
+        }
+        return CachedBrowserSession(storageState.toString(), tokenType, tokenPair)
     }
 
     fun save(sessionKey: String, auth: ResolvedBrowserAuth?, storageState: String): Unit {
@@ -58,6 +66,9 @@ internal class BrowserSessionCache(
             put("auth_fingerprint", authFingerprint(auth))
             put("saved_at_millis", System.currentTimeMillis())
             put("token_type", auth?.tokenPair?.tokenType ?: "Bearer")
+            auth?.tokenPair?.let { tokenPair ->
+                put("token_pair", buildTokenPair(tokenPair))
+            }
             put("storage_state", storageStateObject)
         }
         val bytes = envelope.toString().toByteArray(StandardCharsets.UTF_8)
@@ -97,6 +108,41 @@ internal class BrowserSessionCache(
         return runCatching { Json.parseToJsonElement(value) as? JsonObject }
             .getOrNull()
             ?: error("browser session cache is not valid JSON")
+    }
+
+    private fun parseTokenPair(
+        value: JsonElement?,
+        fallbackTokenType: String
+    ): BrowserTokenPair? {
+        if (value == null) return null
+        val tokenPair = value as? JsonObject
+            ?: error("browser session cache token_pair must be an object")
+        val accessToken = tokenPair.string("access_token")
+            ?: error("browser session cache token_pair access_token is missing")
+        val tokenType = tokenPair.string("token_type") ?: fallbackTokenType
+        val user = tokenPair["user"] as? JsonObject
+            ?: error("browser session cache token_pair user is missing")
+        return BrowserTokenPair(
+            accessToken = accessToken,
+            refreshToken = tokenPair.string("refresh_token"),
+            expiresAtMillis = (tokenPair["expires_at_millis"] as? JsonPrimitive)?.longOrNull,
+            tokenType = tokenType,
+            user = user
+        )
+    }
+
+    private fun buildTokenPair(tokenPair: BrowserTokenPair): JsonObject {
+        return buildJsonObject {
+            put("access_token", tokenPair.accessToken)
+            tokenPair.refreshToken?.let { refreshToken -> put("refresh_token", refreshToken) }
+            tokenPair.expiresAtMillis?.let { expiresAtMillis -> put("expires_at_millis", expiresAtMillis) }
+            put("token_type", tokenPair.tokenType)
+            put("user", tokenPair.user)
+        }
+    }
+
+    private fun JsonObject.string(key: String): String? {
+        return (this[key] as? JsonPrimitive)?.contentOrNull?.trim()?.ifBlank { null }
     }
 
     private fun validateStorageState(storageState: JsonObject): Unit {
@@ -145,7 +191,9 @@ internal class BrowserSessionCache(
     }
 
     private companion object {
-        const val CACHE_VERSION: Int = 1
+        const val LEGACY_CACHE_VERSION: Int = 1
+        const val CACHE_VERSION: Int = 2
+        val SUPPORTED_CACHE_VERSIONS: Set<Int> = setOf(LEGACY_CACHE_VERSION, CACHE_VERSION)
         const val MAX_CACHE_BYTES: Long = 5L * 1_024L * 1_024L
     }
 }

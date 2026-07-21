@@ -8,6 +8,7 @@ import com.microsoft.playwright.Locator
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
 import com.microsoft.playwright.PlaywrightException
+import com.microsoft.playwright.Response
 import com.microsoft.playwright.Route
 import com.microsoft.playwright.TimeoutError
 import com.microsoft.playwright.options.Cookie
@@ -15,11 +16,15 @@ import com.microsoft.playwright.options.RequestOptions
 import com.microsoft.playwright.options.WaitForSelectorState
 import com.microsoft.playwright.options.WaitUntilState
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.api.BrowserTextListItem
+import kim.hhhhhy.x.webhook.api.BrowserTextListRequest
+import kim.hhhhhy.x.webhook.api.BrowserTextListResult
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.TemplateEngine
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -43,10 +48,16 @@ import java.nio.file.Paths
 import java.time.Instant
 import java.util.Base64
 import java.util.Locale
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CancellationException
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.FutureTask
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.function.Consumer
 import javax.imageio.ImageIO
 
 internal object WebPageScreenshotAction {
@@ -62,6 +73,8 @@ internal object WebPageScreenshotAction {
     private const val MAX_SCREENSHOT_RETRIES = 10
     private const val DEFAULT_SCREENSHOT_RETRY_DELAY_MILLIS = 1_000L
     private const val MAX_SCREENSHOT_RETRY_DELAY_MILLIS = 60_000L
+    private const val MAX_BROWSER_QUEUE_SIZE = 32
+    private const val AUTH_RESPONSE_POLL_MILLIS = 250L
     private const val PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT = "PW_TEST_SCREENSHOT_NO_FONTS_READY"
     private val NAVIGATION_WAIT_UNTIL = setOf("commit", "domcontentloaded", "load", "networkidle")
     private val SCREENSHOT_HORIZONTAL_ALIGNMENTS = setOf("left", "center", "right")
@@ -70,8 +83,15 @@ internal object WebPageScreenshotAction {
     @Volatile
     private var workerRef: BrowserWorker? = null
 
+    private var permanentlyClosed: Boolean = false
+    private val querySequence = AtomicLong(0L)
+
     @Volatile
     var lastError: String? = null
+        private set
+
+    @Volatile
+    var lastQueryError: String? = null
         private set
 
     suspend fun capture(
@@ -121,15 +141,60 @@ internal object WebPageScreenshotAction {
         }
     }
 
-    fun reset(): Unit {
-        val worker = synchronized(workerLock) {
-            workerRef.also { workerRef = null }
+    suspend fun queryTextList(
+        action: ActionConfig,
+        context: ExecutionContext,
+        request: BrowserTextListRequest,
+        environment: Map<String, String> = System.getenv(),
+        statusAttribute: String? = null
+    ): BrowserTextListResult {
+        val sequence = querySequence.incrementAndGet()
+        return try {
+            val browserConfig = context.config.browser
+            check(browserConfig.enabled) { "browser actions are disabled" }
+            val spec = parseSpec(action, context)
+            require(spec.screenshotParts.any { part -> part.id == request.partId }) {
+                "browser screenshot part not found: ${request.partId}"
+            }
+            worker().queryTextList(browserConfig, spec, request, environment, statusAttribute).also {
+                if (querySequence.get() == sequence) lastQueryError = null
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (querySequence.get() == sequence) {
+                lastQueryError = error.message?.take(500) ?: error::class.simpleName
+            }
+            throw error
         }
-        worker?.close()
-        lastError = null
     }
 
-    fun close(): Unit = reset()
+    fun open(): Unit = synchronized(workerLock) {
+        permanentlyClosed = false
+    }
+
+    fun reset(): Unit {
+        synchronized(workerLock) {
+            querySequence.incrementAndGet()
+            val worker = workerRef
+            workerRef = null
+            worker?.close()
+        }
+        lastError = null
+        lastQueryError = null
+    }
+
+    fun close(): Unit {
+        synchronized(workerLock) {
+            permanentlyClosed = true
+            querySequence.incrementAndGet()
+            val worker = workerRef
+            workerRef = null
+            worker?.close()
+        }
+        lastError = null
+        lastQueryError = null
+    }
 
     internal fun playwrightDriverEnvironment(): Map<String, String> = mapOf(
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" to "1",
@@ -398,6 +463,48 @@ internal object WebPageScreenshotAction {
         return allowedHosts.any { pattern -> hostMatches(host, pattern) }
     }
 
+    internal fun authorizationHeaderUsesToken(header: String?, tokenPair: BrowserTokenPair): Boolean {
+        val normalized = header?.trim()?.ifBlank { null } ?: return false
+        val separator = normalized.indexOf(' ')
+        if (separator <= 0) return false
+        val tokenType = normalized.substring(0, separator)
+        val accessToken = normalized.substring(separator + 1).trim()
+        return tokenType.equals(tokenPair.tokenType.trim(), ignoreCase = true) &&
+            accessToken == tokenPair.accessToken
+    }
+
+    internal fun isTokenIssuingUrl(url: String, auth: BrowserAuthSpec): Boolean {
+        val candidate = normalizedEndpoint(url) ?: return false
+        val endpoints = buildList {
+            auth.login?.let { login ->
+                add(login.url)
+                add(login.twoFactorUrl)
+                add(login.refreshUrl)
+            }
+            auth.cliBridge?.let { bridge ->
+                add(bridge.startUrl)
+                add(bridge.browserUrl)
+                add(bridge.pollUrl)
+                add(bridge.refreshUrl)
+            }
+        }
+        return endpoints.any { endpoint -> normalizedEndpoint(endpoint) == candidate }
+    }
+
+    private fun normalizedEndpoint(url: String): String? {
+        val uri = runCatching { URI(url) }.getOrNull() ?: return null
+        val origin = uriOrigin(uri) ?: return null
+        val path = uri.rawPath.orEmpty().ifBlank { "/" }.let { value ->
+            if (value.length > 1) value.trimEnd('/') else value
+        }
+        return origin + path
+    }
+
+    private fun sanitizeDiagnosticUrl(url: String): String {
+        return normalizedEndpoint(url)
+            ?: url.substringBefore('#').substringBefore('?').replace(Regex("[\\r\\n]+"), " ").take(300)
+    }
+
     internal fun rewriteUrlForBaseUrl(url: String, baseUrls: List<String>, baseUrl: String): String {
         if (baseUrls.isEmpty()) return url
         val uri = runCatching { URI(url) }.getOrNull() ?: return url
@@ -415,7 +522,12 @@ internal object WebPageScreenshotAction {
     internal fun normalizeSelector(selector: String): String {
         val normalized = selector.trim()
         require(normalized.isNotEmpty()) { "selector must not be blank" }
-        return if (normalized.startsWith("/") || normalized.startsWith("(")) {
+        return if (
+            normalized.startsWith("/") ||
+            normalized.startsWith("(") ||
+            normalized.startsWith("./") ||
+            normalized.startsWith(".//")
+        ) {
             "xpath=$normalized"
         } else {
             normalized
@@ -680,6 +792,7 @@ internal object WebPageScreenshotAction {
         cached: CachedBrowserSession
     ): ResolvedBrowserAuth? {
         if (auth.spec.login == null && auth.spec.cliBridge == null) return null
+        cached.tokenPair?.let { tokenPair -> return withTokenPair(auth, tokenPair) }
         val localStorage = auth.spec.localStorage ?: return null
         val values = readStorageStateLocalStorage(cached.storageState, localStorage.origin)
         val accessToken = values[localStorage.key]?.trim()?.ifBlank { null } ?: return null
@@ -794,8 +907,8 @@ internal object WebPageScreenshotAction {
     }
 
     private fun worker(): BrowserWorker {
-        workerRef?.let { return it }
         return synchronized(workerLock) {
+            check(!permanentlyClosed) { "browser worker is closed" }
             workerRef ?: BrowserWorker().also { workerRef = it }
         }
     }
@@ -1266,9 +1379,17 @@ internal object WebPageScreenshotAction {
     }
 
     private class BrowserWorker {
-        private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        private val executor: ThreadPoolExecutor = ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            ArrayBlockingQueue<Runnable>(MAX_BROWSER_QUEUE_SIZE)
+        ) { runnable ->
             Thread(runnable, "XAiWebHook-Playwright").apply { isDaemon = true }
         }
+        private val closing = AtomicBoolean(false)
+        private val tasks = ConcurrentHashMap<FutureTask<Unit>, CancellableContinuation<*>>()
         private val sessions = mutableMapOf<String, BrowserSession>()
         private val authFailures = mutableMapOf<String, AuthFailure>()
         private val pendingCliTokens = mutableMapOf<String, PendingCliTokens>()
@@ -1285,11 +1406,35 @@ internal object WebPageScreenshotAction {
             return submit { captureOnWorker(config, spec, environment) }
         }
 
+        suspend fun queryTextList(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            request: BrowserTextListRequest,
+            environment: Map<String, String>,
+            statusAttribute: String?
+        ): BrowserTextListResult {
+            return submit { queryTextListOnWorker(config, spec, request, environment, statusAttribute) }
+        }
+
         fun close(): Unit {
-            if (executor.isShutdown) return
+            if (!closing.compareAndSet(false, true)) return
+            val cancellation = CancellationException("browser worker is closing")
+            tasks.forEach { (task, continuation) ->
+                continuation.cancel(cancellation)
+                task.cancel(true)
+                executor.remove(task)
+            }
+            executor.purge()
             val closeFuture = executor.submit { closeOnWorker() }
+            executor.shutdown()
             runCatching { closeFuture.get(30, TimeUnit.SECONDS) }
-            executor.shutdownNow()
+                .onFailure { error ->
+                    runCatching {
+                        XAiWebHook.logger.warning(
+                            "Browser worker is still closing in the background: ${summarizeError(error)}"
+                        )
+                    }
+                }
         }
 
         private fun captureOnWorker(
@@ -1307,11 +1452,47 @@ internal object WebPageScreenshotAction {
                 try {
                     return captureWithResolvedSpec(activeBrowser, config, effectiveSpec, environment)
                 } catch (error: Throwable) {
-                    if (baseUrl == null) throw error
+                    if (baseUrl == null || !isBaseUrlNavigationFailure(error)) throw error
                     failures += baseUrl to error
                     rememberBaseUrlFailure(spec, baseUrl)
                     WebHookDebug.log(
                         "[XAiWebHook] [browser] base_url $baseUrl failed; " +
+                            "trying next candidate: ${summarizeError(error)}"
+                    )
+                }
+            }
+            throw allBaseUrlsFailed(failures)
+        }
+
+        private fun queryTextListOnWorker(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            request: BrowserTextListRequest,
+            environment: Map<String, String>,
+            statusAttribute: String?
+        ): BrowserTextListResult {
+            val activeBrowser = ensureBrowser(config)
+            val failures = mutableListOf<Pair<String, Throwable>>()
+            orderedBaseUrlCandidates(spec).forEach { baseUrl ->
+                val activeSpec = spec.withBaseUrl(baseUrl)
+                val effectiveSpec = activeSpec.copy(
+                    sessionKey = effectiveSessionKey(activeSpec.sessionKey, baseUrl)
+                )
+                try {
+                    return queryTextListWithResolvedSpec(
+                        activeBrowser = activeBrowser,
+                        config = config,
+                        spec = effectiveSpec,
+                        request = request,
+                        environment = environment,
+                        statusAttribute = statusAttribute
+                    )
+                } catch (error: Throwable) {
+                    if (baseUrl == null || !isBaseUrlNavigationFailure(error)) throw error
+                    failures += baseUrl to error
+                    rememberBaseUrlFailure(spec, baseUrl)
+                    WebHookDebug.log(
+                        "[XAiWebHook] [browser] base_url $baseUrl failed during DOM query; " +
                             "trying next candidate: ${summarizeError(error)}"
                     )
                 }
@@ -1325,68 +1506,345 @@ internal object WebPageScreenshotAction {
             spec: WebPageScreenshotSpec,
             environment: Map<String, String>
         ): ByteArray {
-            val resolvedAuth = spec.auth?.let { resolveAuth(it, environment) }
-            val sessionKey = spec.sessionKey
-            val session = if (sessionKey == null) {
-                createSession(activeBrowser, config, resolvedAuth, null)
-            } else {
-                val existing = sessions[sessionKey]
-                if (existing != null && existing.matches(resolvedAuth)) {
-                    ensureSessionFresh(activeBrowser, config, sessionKey, existing, resolvedAuth)
-                } else {
-                    existing?.close()
-                    createSession(activeBrowser, config, resolvedAuth, sessionKey).also { created ->
-                        sessions[sessionKey] = created
+            return withResolvedSession(activeBrowser, config, spec, environment) { session ->
+                val capturedParts = spec.screenshotParts.map { part ->
+                    val page = session.context.newPage()
+                    val authSignal = BrowserAuthRejectionSignal(page, session.auth)
+                    try {
+                        try {
+                            part.steps.forEach { step ->
+                                runStep(page, step, config, environment, authSignal)
+                            }
+                            authSignal.throwIfRejected(page)
+                            waitBeforeScreenshot(page, part, authSignal)
+                            captureScreenshotPart(
+                                page = page,
+                                part = part,
+                                maxScreenshotBytes = config.maxScreenshotBytes,
+                                authSignal = authSignal
+                            )
+                        } catch (error: BrowserAccessTokenRejectedException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            authSignal.throwIfRejected(page)
+                            throw screenshotError(page, part, error)
+                        }
+                    } finally {
+                        authSignal.close()
+                        runCatching { page.close() }
                     }
+                }
+                try {
+                    combineScreenshotsVertically(capturedParts, spec.screenshotLayout).also { bytes ->
+                        validateScreenshotSize(bytes.size, config.maxScreenshotBytes)
+                    }
+                } catch (error: Throwable) {
+                    throw IllegalStateException(
+                        "browser screenshot composition failed: ${summarizeError(error)}",
+                        error
+                    )
                 }
             }
+        }
 
-            try {
-                return try {
-                    val capturedParts = spec.screenshotParts.map { part ->
-                        val page = session.context.newPage()
-                        try {
-                            try {
-                                part.steps.forEach { step -> runStep(page, step, config, environment) }
-                                waitBeforeScreenshot(page, part)
-                                captureScreenshotPart(
-                                    page = page,
-                                    part = part,
-                                    maxScreenshotBytes = config.maxScreenshotBytes
-                                )
-                            } catch (error: Throwable) {
-                                throw screenshotError(page, part, error)
-                            }
-                        } finally {
-                            runCatching { page.close() }
-                        }
-                    }
+        private fun queryTextListWithResolvedSpec(
+            activeBrowser: Browser,
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            request: BrowserTextListRequest,
+            environment: Map<String, String>,
+            statusAttribute: String?
+        ): BrowserTextListResult {
+            val part = spec.screenshotParts.first { item -> item.id == request.partId }
+            return withResolvedSession(activeBrowser, config, spec, environment) { session ->
+                val page = session.context.newPage()
+                val authSignal = BrowserAuthRejectionSignal(page, session.auth)
+                try {
                     try {
-                        combineScreenshotsVertically(capturedParts, spec.screenshotLayout).also { bytes ->
-                            validateScreenshotSize(bytes.size, config.maxScreenshotBytes)
+                        part.steps.forEach { step ->
+                            runStep(page, step, config, environment, authSignal)
                         }
+                        authSignal.throwIfRejected(page)
+                        waitBeforeScreenshot(page, part, authSignal)
+                        waitForTextQueryReady(page, part, request, authSignal)
+                        readTextList(page, request, statusAttribute)
+                    } catch (error: BrowserAccessTokenRejectedException) {
+                        throw error
                     } catch (error: Throwable) {
-                        throw IllegalStateException(
-                            "browser screenshot composition failed: ${summarizeError(error)}",
-                            error
-                        )
+                        authSignal.throwIfRejected(page)
+                        throw textQueryError(page, part, error)
                     }
                 } finally {
-                    if (sessionKey != null) {
-                        runCatching { syncTokenPairAuth(session) }
-                        persistSessionSafely(config, sessionKey, session)
-                    }
+                    authSignal.close()
+                    runCatching { page.close() }
                 }
+            }
+        }
+
+        private fun waitForTextQueryReady(
+            page: Page,
+            part: BrowserScreenshotPart,
+            request: BrowserTextListRequest,
+            authSignal: BrowserAuthRejectionSignal
+        ): Unit {
+            val deadline = System.nanoTime() + part.timeoutMillis * 1_000_000L
+            while (true) {
+                authSignal.throwIfRejected(page)
+                if (hasElements(page, request.itemSelector)) return
+                val emptySelector = request.emptySelector
+                if (emptySelector != null && isVisible(page, emptySelector)) return
+                val remainingNanos = deadline - System.nanoTime()
+                if (remainingNanos <= 0L) {
+                    throw IllegalStateException(
+                        "browser text query item selector was not ready: ${request.itemSelector}"
+                    )
+                }
+                val waitMillis = (remainingNanos / 1_000_000L).coerceAtMost(100L).coerceAtLeast(1L)
+                page.waitForTimeout(waitMillis.toDouble())
+            }
+        }
+
+        private fun isVisible(page: Page, selector: String): Boolean {
+            val locator = page.locator(normalizeSelector(selector))
+            return locator.count() > 0 && runCatching { locator.first().isVisible() }.getOrDefault(false)
+        }
+
+        private fun hasElements(page: Page, selector: String): Boolean {
+            return page.locator(normalizeSelector(selector)).count() > 0
+        }
+
+        private fun isBaseUrlNavigationFailure(error: Throwable): Boolean {
+            val chain = throwableChain(error)
+            val text = chain.joinToString(" ") { item ->
+                item.message.orEmpty().lowercase(Locale.ROOT)
+            }
+            if (text.contains("cli bridge login timed out")) return false
+            if (Regex("\\bhttp\\s+(429|5\\d{2})\\b").containsMatchIn(text)) return true
+            val networkMarkers = listOf(
+                "net::err_",
+                "econnreset",
+                "etimedout",
+                "connection reset",
+                "connection refused",
+                "connection closed",
+                "socket hang up",
+                "connect timed out",
+                "request timed out",
+                "connection timed out"
+            )
+            if (networkMarkers.any(text::contains)) return true
+            val isGotoOrRequest = text.contains("(goto,") ||
+                text.contains(" navigation ") ||
+                text.contains(" request failed") ||
+                text.contains(" request timed out")
+            return isGotoOrRequest &&
+                (text.contains("timeout") || text.contains("timed out") ||
+                    chain.any { item -> item is PlaywrightException && item is TimeoutError })
+        }
+
+        private fun <T> withResolvedSession(
+            activeBrowser: Browser,
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            environment: Map<String, String>,
+            block: (BrowserSession) -> T
+        ): T {
+            val resolvedAuth = spec.auth?.let { resolveAuth(it, environment) }
+            val sessionKey = spec.sessionKey
+            var session = resolveSession(activeBrowser, config, sessionKey, resolvedAuth)
+            var authRecoveryAttempted = false
+
+            while (true) {
+                try {
+                    return executeSessionAttempt(config, sessionKey, session, block)
+                } catch (error: Throwable) {
+                    val rejected = throwableChain(error)
+                        .filterIsInstance<BrowserAccessTokenRejectedException>()
+                        .firstOrNull()
+                        ?: throw error
+                    val renewable = session.auth?.let { auth ->
+                        auth.spec.login != null || auth.spec.cliBridge != null
+                    } == true
+                    if (sessionKey == null || !renewable) {
+                        throw IllegalStateException(
+                            "browser access token was rejected at ${rejected.diagnostic}; " +
+                                "update the configured token or use auth.login/auth.cli_bridge",
+                            rejected
+                        )
+                    }
+                    if (authRecoveryAttempted) {
+                        throw IllegalStateException(
+                            "browser access token remained unauthorized after refresh or re-login " +
+                                "at ${rejected.diagnostic}",
+                            rejected
+                        )
+                    }
+                    authRecoveryAttempted = true
+                    session = recoverRejectedSession(
+                        browser = activeBrowser,
+                        config = config,
+                        sessionKey = sessionKey,
+                        session = session,
+                        candidateAuth = resolvedAuth,
+                        rejection = rejected
+                    )
+                }
+            }
+        }
+
+        private fun resolveSession(
+            browser: Browser,
+            config: BrowserConfig,
+            sessionKey: String?,
+            resolvedAuth: ResolvedBrowserAuth?
+        ): BrowserSession {
+            if (sessionKey == null) return createSession(browser, config, resolvedAuth, null)
+
+            val existing = sessions[sessionKey]
+            if (existing != null && existing.matches(resolvedAuth)) {
+                return ensureSessionFresh(browser, config, sessionKey, existing, resolvedAuth)
+            }
+            existing?.close()
+            val created = createSession(browser, config, resolvedAuth, sessionKey)
+            sessions[sessionKey] = created
+            persistSessionSafely(config, sessionKey, created)
+            return created
+        }
+
+        private fun <T> executeSessionAttempt(
+            config: BrowserConfig,
+            sessionKey: String?,
+            session: BrowserSession,
+            block: (BrowserSession) -> T
+        ): T {
+            var persistSession = sessionKey != null
+            try {
+                return block(session)
             } catch (error: Throwable) {
                 if (sessionKey != null && isClosedContextError(error)) {
-                    sessions.remove(sessionKey)?.close()
+                    persistSession = false
+                    if (sessions[sessionKey] === session) {
+                        sessions.remove(sessionKey)
+                    }
+                    session.close()
                 }
                 throw error
             } finally {
+                if (sessionKey != null && persistSession) {
+                    runCatching { syncTokenPairAuth(session) }
+                    persistSessionSafely(config, sessionKey, session)
+                }
                 if (sessionKey == null) {
                     session.close()
                 }
             }
+        }
+
+        private fun recoverRejectedSession(
+            browser: Browser,
+            config: BrowserConfig,
+            sessionKey: String,
+            session: BrowserSession,
+            candidateAuth: ResolvedBrowserAuth?,
+            rejection: BrowserAccessTokenRejectedException
+        ): BrowserSession {
+            val auth = session.auth ?: throw rejection
+            val refreshedAuth = try {
+                refreshSessionAuth(config, auth)
+            } catch (refreshError: Throwable) {
+                if (sessions[sessionKey] === session) {
+                    sessions.remove(sessionKey)
+                }
+                session.close()
+                deleteSessionCacheSafely(config, sessionKey)
+                warnSessionCache(
+                    "browser access token was rejected and refresh failed; a new login will be used",
+                    refreshError
+                )
+                val replacement = createSession(browser, config, candidateAuth, sessionKey)
+                sessions[sessionKey] = replacement
+                persistSessionSafely(config, sessionKey, replacement)
+                return replacement
+            }
+
+            replaceSessionAuth(browser, config, sessionKey, session, refreshedAuth)
+            runCatching {
+                XAiWebHook.logger.warning(
+                    "Browser access token was rejected; refreshed the token pair and retrying once"
+                )
+            }
+            WebHookDebug.log(
+                "[XAiWebHook] [browser] access token rejected; refreshed token pair and retrying once"
+            )
+            return session
+        }
+
+        private fun readTextList(
+            page: Page,
+            request: BrowserTextListRequest,
+            statusAttribute: String?
+        ): BrowserTextListResult {
+            val items = page.locator(normalizeSelector(request.itemSelector))
+            val count = items.count()
+            require(count <= request.maxItems) {
+                "browser text query matched $count items; maximum is ${request.maxItems}"
+            }
+            if (count == 0) {
+                val emptyState = request.emptySelector?.let { selector ->
+                    val empty = page.locator(normalizeSelector(selector))
+                    empty.count() > 0 && runCatching { empty.first().isVisible() }.getOrDefault(false)
+                } ?: false
+                require(emptyState) { "browser text query matched no items and no visible empty state" }
+                return BrowserTextListResult(
+                    effectiveUrl = page.url(),
+                    items = emptyList(),
+                    emptyState = true
+                )
+            }
+
+            return BrowserTextListResult(
+                effectiveUrl = page.url(),
+                items = (0 until count).map { index ->
+                    val item = items.nth(index)
+                    BrowserTextListItem(
+                        index = index + 1,
+                        itemText = readInnerText(item),
+                        nameText = request.nameRelativeSelector?.let { selector ->
+                            readRelativeInnerText(item, selector)
+                        },
+                        statusText = readRelativeValue(
+                            item = item,
+                            selector = request.statusRelativeSelector,
+                            attribute = statusAttribute
+                        ),
+                        domId = readAttribute(item, "id"),
+                        dataChannelId = readAttribute(item, "data-channel-id"),
+                        ariaLabel = readAttribute(item, "aria-label")
+                    )
+                },
+                emptyState = false
+            )
+        }
+
+        private fun readRelativeInnerText(item: Locator, selector: String): String? {
+            val locator = item.locator(normalizeSelector(selector))
+            if (locator.count() == 0) return null
+            return readInnerText(locator.first())
+        }
+
+        private fun readRelativeValue(item: Locator, selector: String, attribute: String?): String? {
+            val locator = item.locator(normalizeSelector(selector))
+            if (locator.count() == 0) return null
+            val target = locator.first()
+            return if (attribute == null) readInnerText(target) else readAttribute(target, attribute)
+        }
+
+        private fun readInnerText(locator: Locator): String? {
+            return locator.innerText().trim().ifBlank { null }
+        }
+
+        private fun readAttribute(locator: Locator, name: String): String? {
+            return locator.getAttribute(name)?.trim()?.ifBlank { null }
         }
 
         private fun orderedBaseUrlCandidates(spec: WebPageScreenshotSpec): List<String?> {
@@ -1416,26 +1874,37 @@ internal object WebPageScreenshotAction {
             }
         }
 
-        private fun waitBeforeScreenshot(page: Page, part: BrowserScreenshotPart): Unit {
+        private fun waitBeforeScreenshot(
+            page: Page,
+            part: BrowserScreenshotPart,
+            authSignal: BrowserAuthRejectionSignal
+        ): Unit {
             if (part.delayBeforeMillis <= 0L) return
             WebHookDebug.log(
                 "[XAiWebHook] [browser] waiting ${part.delayBeforeMillis}ms before screenshot part ${part.id}"
             )
-            page.waitForTimeout(part.delayBeforeMillis.toDouble())
+            waitForTimeoutWithAuthSignal(page, part.delayBeforeMillis, authSignal)
         }
 
         private fun captureScreenshotPart(
             page: Page,
             part: BrowserScreenshotPart,
-            maxScreenshotBytes: Long
+            maxScreenshotBytes: Long,
+            authSignal: BrowserAuthRejectionSignal
         ): ByteArray {
             val target = page.locator(part.selector)
-            target.waitFor(
-                Locator.WaitForOptions()
-                    .setState(WaitForSelectorState.VISIBLE)
-                    .setTimeout(part.timeoutMillis.toDouble())
-            )
+            if (!waitForLocatorWithAuthSignal(
+                    page = page,
+                    locator = target,
+                    state = WaitForSelectorState.VISIBLE,
+                    timeoutMillis = part.timeoutMillis,
+                    authSignal = authSignal
+                )
+            ) {
+                throw TimeoutError("Timeout ${part.timeoutMillis}ms exceeded.")
+            }
             waitForFontsBestEffort(page, part.fontWaitTimeoutMillis)
+            authSignal.throwIfRejected(page)
             val screenshotOptions = Locator.ScreenshotOptions()
                 .setTimeout(part.timeoutMillis.toDouble())
             buildScreenshotStyle(part.hideSelectors)?.let { style ->
@@ -1560,7 +2029,18 @@ internal object WebPageScreenshotAction {
                 warnSessionCache("cached browser session could not be refreshed; a new login will be used", error)
                 return null
             }
-            return RestoredBrowserSession(freshAuth, cached.storageState)
+            val storageState = if (freshAuth != restoredAuth) {
+                mergeStorageState(cached.storageState, freshAuth).also { mergedStorageState ->
+                    try {
+                        cache.save(sessionKey, freshAuth, mergedStorageState)
+                    } catch (error: Throwable) {
+                        warnSessionCache("refreshed browser session cache could not be saved", error)
+                    }
+                }
+            } else {
+                cached.storageState
+            }
+            return RestoredBrowserSession(freshAuth, storageState)
         }
 
         private fun prepareCredentialAuth(
@@ -1673,17 +2153,28 @@ internal object WebPageScreenshotAction {
                 warnSessionCache("browser session refresh failed; a new login will be used", error)
                 val replacement = createSession(browser, config, candidateAuth, sessionKey)
                 sessions[sessionKey] = replacement
+                persistSessionSafely(config, sessionKey, replacement)
                 return replacement
             }
             if (refreshedAuth == auth) return session
 
-            val storageState = runCatching { session.context.storageState() }.getOrNull()
+            replaceSessionAuth(browser, config, sessionKey, session, refreshedAuth)
+            return session
+        }
+
+        private fun replaceSessionAuth(
+            browser: Browser,
+            config: BrowserConfig,
+            sessionKey: String,
+            session: BrowserSession,
+            refreshedAuth: ResolvedBrowserAuth
+        ): Unit {
+            val storageState = session.context.storageState()
             val replacement = newContext(browser, config, refreshedAuth, storageState)
             runCatching { session.context.close() }
             session.context = replacement
             session.auth = refreshedAuth
             persistSessionSafely(config, sessionKey, session)
-            return session
         }
 
         private fun refreshSessionAuthIfNeeded(
@@ -1697,7 +2188,13 @@ internal object WebPageScreenshotAction {
                 ?: return auth
             val refreshAtMillis = expiresAtMillis - refreshBeforeExpirySeconds * 1_000L
             if (System.currentTimeMillis() < refreshAtMillis) return auth
+            return refreshSessionAuth(config, auth)
+        }
 
+        private fun refreshSessionAuth(
+            config: BrowserConfig,
+            auth: ResolvedBrowserAuth
+        ): ResolvedBrowserAuth {
             val refreshed = when {
                 auth.spec.login != null -> {
                     val activePlaywright = playwright ?: error("Playwright is not initialized")
@@ -1711,7 +2208,7 @@ internal object WebPageScreenshotAction {
                     auth = auth,
                     timeoutMillis = config.timeoutMillis
                 )
-                else -> return auth
+                else -> error("browser auth refresh source is missing")
             }
             return withTokenPair(auth, refreshed)
         }
@@ -1903,9 +2400,11 @@ internal object WebPageScreenshotAction {
             page: Page,
             step: BrowserStep,
             config: BrowserConfig,
-            environment: Map<String, String>
+            environment: Map<String, String>,
+            authSignal: BrowserAuthRejectionSignal
         ): Unit {
             val timeout = step.timeoutMillis ?: config.timeoutMillis
+            authSignal.throwIfRejected(page)
             try {
                 when (step.op) {
                     "goto" -> {
@@ -1920,51 +2419,141 @@ internal object WebPageScreenshotAction {
                         validateNavigationUrl(page.url(), config.allowedHosts)
                     }
                     "fill" -> {
-                        val locator = actionableLocator(page, step, config) ?: return
+                        val locator = actionableLocator(page, step, config, authSignal) ?: return
                         val value = resolveFillValue(step, environment)
                         locator.fill(value, Locator.FillOptions().setTimeout(timeout.toDouble()))
                     }
                     "click" -> {
-                        val locator = actionableLocator(page, step, config) ?: return
+                        val locator = actionableLocator(page, step, config, authSignal) ?: return
                         locator.click(Locator.ClickOptions().setTimeout(timeout.toDouble()))
                     }
                     "wait" -> {
                         val locator = page.locator(step.selector.orEmpty())
-                        locator.waitFor(
-                            Locator.WaitForOptions()
-                                .setState(step.waitState())
-                                .setTimeout(timeout.toDouble())
-                        )
+                        if (!waitForLocatorWithAuthSignal(
+                                page = page,
+                                locator = locator,
+                                state = step.waitState(),
+                                timeoutMillis = timeout,
+                                authSignal = authSignal
+                            )
+                        ) {
+                            throw TimeoutError("Timeout ${timeout}ms exceeded.")
+                        }
                     }
-                    "wait_url" -> page.waitForURL(
-                        step.url.orEmpty(),
-                        Page.WaitForURLOptions().setTimeout(timeout.toDouble())
-                    )
+                    "wait_url" -> if (!waitForUrlWithAuthSignal(
+                            page = page,
+                            url = step.url.orEmpty(),
+                            timeoutMillis = timeout,
+                            authSignal = authSignal
+                        )
+                    ) {
+                        throw TimeoutError("Timeout ${timeout}ms exceeded.")
+                    }
                 }
+                authSignal.throwIfRejected(page)
+            } catch (error: BrowserAccessTokenRejectedException) {
+                throw error
             } catch (error: TimeoutError) {
+                authSignal.throwIfRejected(page)
                 if (!step.optional) throw stepError(page, step, error)
             } catch (error: Throwable) {
+                authSignal.throwIfRejected(page)
                 throw stepError(page, step, error)
             }
         }
 
-        private fun actionableLocator(page: Page, step: BrowserStep, config: BrowserConfig): Locator? {
+        private fun actionableLocator(
+            page: Page,
+            step: BrowserStep,
+            config: BrowserConfig,
+            authSignal: BrowserAuthRejectionSignal
+        ): Locator? {
             val locator = page.locator(step.selector.orEmpty())
             val waitTimeout = if (step.optional) {
                 step.timeoutMillis ?: config.optionalStepTimeoutMillis
             } else {
                 step.timeoutMillis ?: config.timeoutMillis
             }
-            return try {
-                locator.waitFor(
-                    Locator.WaitForOptions()
-                        .setState(WaitForSelectorState.VISIBLE)
-                        .setTimeout(waitTimeout.toDouble())
-                )
-                locator
-            } catch (error: TimeoutError) {
-                if (step.optional) null else throw error
+            val ready = waitForLocatorWithAuthSignal(
+                page = page,
+                locator = locator,
+                state = WaitForSelectorState.VISIBLE,
+                timeoutMillis = waitTimeout,
+                authSignal = authSignal
+            )
+            return when {
+                ready -> locator
+                step.optional -> null
+                else -> throw TimeoutError("Timeout ${waitTimeout}ms exceeded.")
             }
+        }
+
+        private fun waitForLocatorWithAuthSignal(
+            page: Page,
+            locator: Locator,
+            state: WaitForSelectorState,
+            timeoutMillis: Long,
+            authSignal: BrowserAuthRejectionSignal
+        ): Boolean {
+            val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
+            while (true) {
+                authSignal.throwIfRejected(page)
+                val remainingNanos = deadline - System.nanoTime()
+                if (remainingNanos <= 0L) return false
+                val sliceMillis = (remainingNanos / 1_000_000L)
+                    .coerceAtMost(AUTH_RESPONSE_POLL_MILLIS)
+                    .coerceAtLeast(1L)
+                try {
+                    locator.waitFor(
+                        Locator.WaitForOptions()
+                            .setState(state)
+                            .setTimeout(sliceMillis.toDouble())
+                    )
+                    authSignal.throwIfRejected(page)
+                    return true
+                } catch (_: TimeoutError) {
+                    authSignal.throwIfRejected(page)
+                }
+            }
+        }
+
+        private fun waitForUrlWithAuthSignal(
+            page: Page,
+            url: String,
+            timeoutMillis: Long,
+            authSignal: BrowserAuthRejectionSignal
+        ): Boolean {
+            val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
+            while (true) {
+                authSignal.throwIfRejected(page)
+                val remainingNanos = deadline - System.nanoTime()
+                if (remainingNanos <= 0L) return false
+                val sliceMillis = (remainingNanos / 1_000_000L)
+                    .coerceAtMost(AUTH_RESPONSE_POLL_MILLIS)
+                    .coerceAtLeast(1L)
+                try {
+                    page.waitForURL(url, Page.WaitForURLOptions().setTimeout(sliceMillis.toDouble()))
+                    authSignal.throwIfRejected(page)
+                    return true
+                } catch (_: TimeoutError) {
+                    authSignal.throwIfRejected(page)
+                }
+            }
+        }
+
+        private fun waitForTimeoutWithAuthSignal(
+            page: Page,
+            timeoutMillis: Long,
+            authSignal: BrowserAuthRejectionSignal
+        ): Unit {
+            var remainingMillis = timeoutMillis
+            while (remainingMillis > 0L) {
+                authSignal.throwIfRejected(page)
+                val sliceMillis = remainingMillis.coerceAtMost(AUTH_RESPONSE_POLL_MILLIS)
+                page.waitForTimeout(sliceMillis.toDouble())
+                remainingMillis -= sliceMillis
+            }
+            authSignal.throwIfRejected(page)
         }
 
         private fun BrowserStep.waitState(): WaitForSelectorState {
@@ -2010,6 +2599,18 @@ internal object WebPageScreenshotAction {
             )
         }
 
+        private fun textQueryError(
+            page: Page,
+            part: BrowserScreenshotPart,
+            cause: Throwable
+        ): IllegalStateException {
+            return IllegalStateException(
+                "browser text query part ${part.index} (id=${part.id}) failed " +
+                    "at ${pageDiagnostic(page)}: ${summarizeError(cause)}",
+                cause
+            )
+        }
+
         private fun pageDiagnostic(page: Page): String {
             val url = runCatching { page.url() }
                 .getOrDefault("(unknown)")
@@ -2038,6 +2639,62 @@ internal object WebPageScreenshotAction {
             return message.contains("context or browser has been closed", ignoreCase = true) ||
                 message.contains("Target page, context or browser has been closed", ignoreCase = true)
         }
+
+        private fun isAuthenticatedUnauthorizedResponse(
+            response: Response,
+            auth: ResolvedBrowserAuth?
+        ): Boolean {
+            if (response.status() != 401) return false
+            val activeAuth = auth ?: return false
+            if (isTokenIssuingUrl(response.url(), activeAuth.spec)) return false
+            val authorization = runCatching {
+                response.request().headerValue("Authorization")
+            }.getOrNull()
+            activeAuth.tokenPair?.let { tokenPair ->
+                return authorizationHeaderUsesToken(authorization, tokenPair)
+            }
+            val token = activeAuth.token ?: return false
+            if (!activeAuth.spec.headerName.equals("Authorization", ignoreCase = true)) return false
+            return authorization?.trim() == (activeAuth.spec.headerPrefix + token).trim()
+        }
+
+        private inner class BrowserAuthRejectionSignal(
+            private val page: Page,
+            private val auth: ResolvedBrowserAuth?
+        ) {
+            private var rejectedUrl: String? = null
+            private val listener = Consumer<Response> { response ->
+                if (rejectedUrl == null && isAuthenticatedUnauthorizedResponse(response, auth)) {
+                    rejectedUrl = sanitizeDiagnosticUrl(response.url())
+                }
+            }
+            private val listening = auth?.let { activeAuth ->
+                activeAuth.tokenPair != null ||
+                    (activeAuth.token != null &&
+                        activeAuth.spec.headerName.equals("Authorization", ignoreCase = true))
+            } == true
+
+            init {
+                if (listening) page.onResponse(listener)
+            }
+
+            fun throwIfRejected(activePage: Page): Unit {
+                val responseUrl = rejectedUrl ?: return
+                throw BrowserAccessTokenRejectedException(
+                    "responseUrl=$responseUrl, ${pageDiagnostic(activePage)}"
+                )
+            }
+
+            fun close(): Unit {
+                if (listening) runCatching { page.offResponse(listener) }
+            }
+        }
+
+        private class BrowserAccessTokenRejectedException(
+            val diagnostic: String
+        ) : IllegalStateException(
+            "browser access token was rejected by an authenticated HTTP 401 response at $diagnostic"
+        )
 
         private data class BrowserSession(
             var context: BrowserContext,
@@ -2094,15 +2751,36 @@ internal object WebPageScreenshotAction {
         }
 
         private suspend fun <T> submit(block: () -> T): T {
+            if (closing.get()) throw CancellationException("browser worker is closing")
             return suspendCancellableCoroutine { continuation ->
-                try {
-                    executor.execute {
+                lateinit var task: FutureTask<Unit>
+                task = FutureTask {
+                    try {
                         val result = runCatching(block)
                         if (continuation.isActive) {
                             continuation.resumeWith(result)
                         }
+                    } finally {
+                        tasks.remove(task)
                     }
-                } catch (error: Throwable) {
+                }
+                tasks[task] = continuation
+                continuation.invokeOnCancellation {
+                    tasks.remove(task)
+                    task.cancel(true)
+                    executor.remove(task)
+                }
+                if (closing.get()) {
+                    tasks.remove(task)
+                    task.cancel(true)
+                    continuation.cancel(CancellationException("browser worker is closing"))
+                    return@suspendCancellableCoroutine
+                }
+                try {
+                    executor.execute(task)
+                } catch (error: RejectedExecutionException) {
+                    tasks.remove(task)
+                    task.cancel(true)
                     if (continuation.isActive) {
                         continuation.resumeWith(Result.failure(error))
                     }

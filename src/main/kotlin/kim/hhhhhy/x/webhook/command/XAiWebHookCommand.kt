@@ -62,6 +62,7 @@ public object XAiWebHookCommand : CompositeCommand(
             appendLine("config error: ${WebHookConfig.lastError ?: "none"}")
             appendLine("server error: ${WebHookServer.lastError ?: "none"}")
             appendLine("browser error: ${WebPageScreenshotAction.lastError ?: "none"}")
+            appendLine("browser query error: ${WebPageScreenshotAction.lastQueryError ?: "none"}")
         }
         sendMessage(status)
     }

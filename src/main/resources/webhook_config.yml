@@ -62,6 +62,7 @@ browser:
   allowed_hosts:
     - "hk.geek2api.com"
     - "hk2.geek2api.com"
+    - "hk3.geek2api.com"
     - "hk4.geek2api.com"
     - "hk5.geek2api.com"
   # 单张截图最大字节数，默认 10485760（10 MiB），范围 1024-52428800
@@ -136,7 +137,7 @@ incoming:
 
     # 同一个网页截图动作也可由 incoming 调用；请求体传 group_id 或 friend_id 指定接收方
     - id: "webpage-screenshot"
-      # 默认关闭，启用前需配置 browser、环境变量和目标站点登录步骤
+      # 默认关闭；启用前需设置 browser.enabled: true，并按请求体提供 group_id 或 friend_id
       enabled: false
       method: "POST"
       path: "/webpage-screenshot"
@@ -188,7 +189,7 @@ outgoing:
             sender_name: "${event.senderName}"
             message: "${event.messageText}"
 
-    # 群成员发送“监控截图”时执行网页登录与截图动作，并自动把图片发回当前群
+    # 群成员发送“监控截图”时截取 Geek2Api 公共状态页，并自动把图片发回当前群
     - id: "geek2api-monitor-command"
       # 默认关闭；启用前需同时开启 browser.enabled 和下方命名动作
       enabled: false
@@ -243,111 +244,66 @@ outgoing:
 
 # actions：可复用的命名动作，incoming/outgoing 可用字符串名或 ref 引用
 actions:
-  # Geek2Api 监控页面截图示例；首次使用 CLI Bridge 打开系统浏览器授权，后续自动刷新登录态
+  # Geek2Api 公共状态页截图示例；/status 无需登录，可查看渠道状态和各 URL 端点延迟
   geek2api-monitor-screenshot:
     type: "send_webpage_screenshot"
-    # 默认关闭；启用前需同时设置 browser.enabled: true，并确保 mirai 所在系统可打开默认浏览器
+    # 默认开启；启用前需同时设置 browser.enabled: true
     enabled: true
-    # 登录会话复用键；相同键复用 token/Cookie/localStorage，开启 browser.session_cache_enabled 后可跨 reload/重启恢复
-    session_key: "geek2api-monitor"
-    # Geek2Api base URL candidates; the current URL is sticky and switches only after a request/navigation error
-    # URLs using one of these origins keep their path/query and switch to the active candidate origin at runtime
-    # hk5 is primary; hk, hk2 and hk4 are fallbacks; hk3 is expired and not configured
+    # 公共状态页候选基址；当前 URL 成功时保持使用，仅在请求或导航失败后切换下一项
+    # 五个香港节点都提供相同的 /status 页面，列表顺序即 failover 顺序
     base_urls:
-      - "https://hk5.geek2api.com"
       - "https://hk.geek2api.com"
       - "https://hk2.geek2api.com"
+      - "https://hk3.geek2api.com"
       - "https://hk4.geek2api.com"
+      - "https://hk5.geek2api.com"
     # incoming 可通过请求体指定群号；outgoing 中变量为空时自动回退到触发事件所在会话
     group_id: "${request.body.group_id}"
     # incoming 可通过请求体指定好友号；group_id 和 friend_id 不能同时有效
     friend_id: "${request.body.friend_id}"
-    # 首次触发会打开系统浏览器，用户须在 5 分钟内完成登录授权；内存或磁盘缓存仍有效时不会重复打开
-    pending_message: "正在获取监控截图..."
+    # /status 为公开页面，不会打开登录或 CLI Bridge 授权窗口
+    pending_message: "正在获取 Geek2Api 公共状态页截图..."
     # 截图失败时发送给聊天用户的脱敏提示，内部详细原因仅写控制台日志
-    failure_message: "监控页面截图失败，请稍后重试。"
+    failure_message: "Geek2Api 公共状态页截图失败，请稍后重试。"
     # 图片前的可选说明文字，留空时只发送图片
     message: ""
-    # CLI Bridge 与 token/token_env、login 三种认证源必须且只能配置一种
-    auth:
-      cli_bridge:
-        # 创建 300 秒桥接会话，请求体固定为 {}
-        start_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/start"
-        # 系统浏览器授权页；插件只附加 bridge_id，绝不会把 poll_secret 放入 URL
-        browser_url: "https://hk5.geek2api.com/cli-bridge"
-        # 轮询授权结果，请求体为 bridge_id + poll_secret；token 只会交付一次
-        poll_url: "https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll"
-        # 取得 token 后读取当前用户，补齐前端路由守卫要求的 auth_user
-        profile_url: "https://hk5.geek2api.com/api/v1/user/profile"
-        # access token 临近过期时提交 refresh_token，并覆盖旋转后的 token pair
-        refresh_url: "https://hk5.geek2api.com/api/v1/auth/refresh"
-        # 轮询间隔默认 2500 毫秒，范围 2000-30000，避免触发 120 次/分钟限流
-        poll_interval_ms: 2500
-        # 单次授权最多等待 300000 毫秒，且不会超过 start 返回的 expires_in
-        max_wait_ms: 300000
-        # access token 到期前 120 秒刷新，范围 0-3600
-        refresh_before_expiry_seconds: 120
-        # 授权失败后 60 秒内不重新 start，避免触发 20 次/分钟限流
-        retry_cooldown_ms: 60000
-      # 授权成功后按 Geek2Api 前端约定写入四个 localStorage 键
-      local_storage:
-        # 必须是 browser.allowed_hosts 中的无路径 origin
-        origin: "https://hk5.geek2api.com"
-        # access_token 写入的键名
-        key: "auth_token"
-        # access token 前缀，Geek2Api 使用原始 token，因此留空
-        prefix: ""
-        # refresh_token 写入的键名
-        refresh_token_key: "refresh_token"
-        # 当前时间 + expires_in 写入的毫秒时间戳键名
-        expires_at_key: "token_expires_at"
-        # profile 用户对象序列化后的键名
-        user_key: "auth_user"
-    # CLI Bridge 登录在真实系统浏览器完成，可使用账号密码、OAuth、验证码和网页 2FA
-    # 每个截图项使用独立 Page，但共享同一 BrowserContext 中的 Cookie、localStorage 和 token
+    # 公共页面无需 auth；每个截图项使用独立 Page，并复用同一无登录 BrowserContext
     screenshot:
       # 截图项列表，按配置顺序从上到下拼接；默认至少 1 项、最多 16 项
       # 每项支持 id、enabled、url、wait_until、steps、selector、timeout_ms、delay_before_ms、font_wait_timeout_ms、hide_selectors
       parts:
-        # 第一项：从 /keys 截取运行概览，放在最终图片顶部
-        - id: "keys-overview"
+        # 截取完整 /status 主内容，包含页面概览、URL 端点延迟和全部渠道状态
+        # 保留 monitor-status id，兼容依赖浏览器文本查询 API 的现有插件
+        - id: "monitor-status"
           # 单项开关，默认 true；false 时整项跳过，至少需保留一个启用项
           enabled: true
-          # 可选导航快捷方式；会生成首个 goto 步骤，并随 base_urls 保留路径切换候选域名
-          url: "https://hk5.geek2api.com/keys"
+          # 会随 base_urls 保留 /status 路径，并在当前域名不可用时切换下一候选
+          url: "https://hk.geek2api.com/status"
           # url 导航等待阶段，默认 commit；可选 commit/domcontentloaded/load/networkidle
           wait_until: "commit"
-          # 最终元素定位器，支持 CSS 或 XPath；截图前会自动等待 visible
-          selector: '//*[@id="app"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]'
-
-        # 第二项：从 /monitor 截取监控状态卡片，拼接在运行概览下方
-        - id: "monitor-status"
-          enabled: true
-          url: "https://hk5.geek2api.com/monitor"
-          wait_until: "commit"
-          # url 导航后按顺序执行的受限步骤，支持 goto/fill/click/wait/wait_url；总计最多 32 步
           steps:
-            # 主区域在骨架屏阶段已经可见，只用于确认页面挂载
+            # 至少一个端点按钮出现，确保 URL 端点列表已经挂载
             - op: "wait"
-              selector: '//*[@id="app"]/div[2]/div[2]/main'
+              selector: '//*[@id="app"]/div[2]/main/section[2]/div[2]/div[1]/button'
               state: "visible"
-            # 真实卡片或合法空状态出现时，Vue 已结束首次数据加载
+              timeout_ms: 60000
+            # 第一张真实渠道卡片或合法空状态出现，确保公共监控数据已经完成首次加载
             - op: "wait"
-              selector: "(//*[@id='app']/div[2]/div[2]/main//button[@type='button' and contains(concat(' ', normalize-space(@class), ' '), ' group ') and contains(concat(' ', normalize-space(@class), ' '), ' min-h-[280px] ')] | //*[@id='app']/div[2]/div[2]/main//div[contains(concat(' ', normalize-space(@class), ' '), ' empty-state ')])[1]"
+              selector: '(//*[@id="app"]/div[2]/main/div/div/div/button[1] | //*[@id="app"]/div[2]/main//div[contains(concat(" ", normalize-space(@class), " "), " empty-state ")])[1]'
               state: "visible"
-              timeout_ms: 90000
-          selector: '//*[@id="app"]/div[2]/div[2]/main'
+              timeout_ms: 60000
+          # header 位于 main 外部但使用 fixed 定位；截图时需临时隐藏，避免覆盖 main 顶部
+          selector: '//*[@id="app"]/div[2]/main'
 
       # 以下四项是所有 parts 的默认值；单项配置同名字段时覆盖默认值
-      # 每项完成 URL 导航和 steps 后、等待 selector 并截图前的固定等待，单位毫秒；默认 0，范围 0-300000
-      # 此处设为 3000，因此第一项和后续项都会等待 3 秒；单项可配置 delay_before_ms: 0 跳过
+      # 完成导航和两项就绪等待后，再等待 3 秒，让端点测速和渠道数据稳定
       delay_before_ms: 3000
       # 截图元素等待与截图操作超时，单位毫秒；默认回退 browser.timeout_ms，范围 100-300000
       timeout_ms: 60000
-      # 截图前等待网页字体完成加载的最长时间；默认 3000 且不超过 timeout_ms，0 表示不等待
-      font_wait_timeout_ms: 60000
-      # 截图瞬间临时隐藏的 CSS selector 列表，最多 32 项；单项可配置自己的列表替换此默认值
-      hide_selectors: ["header.sticky"]
+      # 字体或第三方资源未结束时最多等待 3 秒，然后使用当前渲染结果继续截图
+      font_wait_timeout_ms: 3000
+      # /status 当前页头是 fixed header，不含 sticky 类；截图 main 时按实际 DOM 选择器隐藏
+      hide_selectors: ["#app header"]
       # 纵向合成布局；未配置 layout 时默认居中且无间距
       layout:
         # 宽度不同时的水平对齐方式：left、center、right，默认 center

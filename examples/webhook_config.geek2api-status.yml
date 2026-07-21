@@ -1,0 +1,219 @@
+# XAiWebHook 完整实例：Geek2Api 公共状态页截图
+#
+# 使用前必须完成：
+# 1. 将 change-me-incoming-token 替换为强随机 Bearer Token。
+# 2. 将群号、好友号、发送者 QQ 占位符替换为实际允许值。
+# 3. Windows 默认复用系统 Edge；其它平台需修改 browser.channel 或 executable_path。
+# 4. 本实例只访问公开的 /status 页面，不需要 Geek2Api 账号、Token 或 CLI Bridge 授权。
+
+# HTTP incoming 服务
+server:
+  # 是否启动 HTTP 服务；仅使用 outgoing 时可设为 false
+  enabled: true
+  # 默认仅监听本机；需要局域网访问时可改为 0.0.0.0，但必须使用强 Token
+  host: "127.0.0.1"
+  # 监听端口，范围 1-65535
+  port: 18080
+  # incoming 端点统一前缀
+  base_path: "/webhook"
+
+# incoming Bearer Token 鉴权
+auth:
+  # 当前仅支持 bearer
+  type: "bearer"
+  # 调用 incoming API 时使用：Authorization: Bearer change-me-incoming-token
+  tokens:
+    - "change-me-incoming-token"
+  # 是否允许回环地址无 Token 调用，生产环境建议保持 false
+  allow_empty_for_localhost: false
+
+# 模板表达式
+templates:
+  # 启用 ${request...} 与 ${event...} 模板
+  enable_expressions: true
+  # 变量不存在时替换为空字符串，便于同一 action 同时复用 incoming/outgoing
+  strict_missing_variables: false
+
+# 浏览器运行时
+browser:
+  # send_webpage_screenshot 总开关
+  enabled: true
+  # 可选 chromium、firefox、webkit；Edge/Chrome channel 使用 chromium
+  engine: "chromium"
+  # Windows 默认复用系统 Edge；使用 Playwright Chromium 时留空
+  channel: "msedge"
+  # 自定义浏览器路径；配置后优先于 channel，默认留空
+  executable_path: ""
+  # 公共状态页可直接使用无头浏览器，不会额外打开系统授权窗口
+  headless: true
+  # 页面视口尺寸
+  viewport_width: 1440
+  viewport_height: 1000
+  # 浏览器步骤默认超时，单位毫秒
+  timeout_ms: 30000
+  # optional 步骤查找元素的等待时间，单位毫秒
+  optional_step_timeout_ms: 1000
+  # /status 无需登录态，保持 false，避免把无关 Cookie/localStorage 写入磁盘
+  session_cache_enabled: false
+  # 缓存关闭时不会使用此目录；保留默认值便于后续扩展受保护页面
+  session_cache_dir: "browser-session-cache"
+  # 只允许导航到五个公共状态页域名，顺序与动作 base_urls 一致
+  allowed_hosts:
+    - "hk.geek2api.com"
+    - "hk2.geek2api.com"
+    - "hk3.geek2api.com"
+    - "hk4.geek2api.com"
+    - "hk5.geek2api.com"
+  # 单张图片最大 10 MiB
+  max_screenshot_bytes: 10485760
+
+# 安全设置
+security:
+  # 本实例不需要命令执行，保持关闭
+  allow_command_execution: false
+  # incoming 请求体最大 1 MiB
+  max_body_bytes: 1048576
+
+# 日志设置
+logging:
+  # 记录 incoming/outgoing 调用摘要
+  request: true
+  # 记录 incoming 响应摘要
+  response: true
+  # 记录错误堆栈
+  error_stacktrace: true
+  # 排障时可临时开启；生产环境建议 false
+  debug: false
+
+# incoming：外部系统通过 HTTP 请求截图
+incoming:
+  endpoints:
+    - id: "geek2api-monitor-screenshot"
+      enabled: true
+      method: "POST"
+      # 完整地址：http://127.0.0.1:18080/webhook/geek2api-monitor
+      path: "/geek2api-monitor"
+      # 未配置端点 tokens，因此使用 auth.tokens
+      # 与两个 outgoing 路由共享单飞键：任一截图未完成时，其他入口返回 HTTP 409 或聊天提示
+      single_flight:
+        enabled: true
+        key: "geek2api-monitor-screenshot"
+        notify: true
+        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
+      actions:
+        # 请求体传 group_id 或 friend_id，不能同时传两个
+        - ref: "geek2api-monitor-screenshot"
+        - type: "reply"
+          status: 200
+          body:
+            success: true
+            message: "Geek2Api monitor screenshot sent"
+
+# outgoing：群/好友消息触发截图
+outgoing:
+  routes:
+    # 指定群、指定发送者发送“监控截图”时，将图片自动发回当前群
+    - id: "geek2api-monitor-group-command"
+      enabled: true
+      events: ["group_message"]
+      # 替换为允许使用该功能的群号
+      groups: [123456789]
+      # 替换为允许触发的管理员 QQ；如不限制发送者可改为空列表 []
+      senders: [123456789]
+      message:
+        # 四类文本规则之间为“或”：包含“炸了么”，或以“状态检查”/“监控截图”开头均触发
+        contains: ["炸了么"]
+        starts_with: ["状态检查", "监控截图"]
+      # actions 未完成前禁止 incoming、群聊和好友入口再次触发同一截图任务
+      single_flight:
+        enabled: true
+        key: "geek2api-monitor-screenshot"
+        notify: true
+        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
+      # 冷却按当前路由隔离：普通成员 60 秒、管理员 10 秒，所有未绕过用户共享 5 秒全局冷却
+      cooldown:
+        enabled: true
+        # 普通用户按发送者 QQ 独立计时，范围 0-604800000 毫秒
+        personal_ms: 60000
+        # 群管理员/群主或持有插件 admin 权限的用户使用此时长
+        administrator_ms: 10000
+        # 本路由所有未绕过用户共享；获授权管理员不会读取或写入冷却状态
+        global_ms: 5000
+        # 为 true 时在当前会话提示剩余时间
+        notify: true
+        message: "监控截图指令冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        - ref: "geek2api-monitor-screenshot"
+
+    # 指定好友发送“监控截图”时，将图片自动发回该好友
+    - id: "geek2api-monitor-friend-command"
+      enabled: true
+      events: ["friend_message"]
+      # 替换为允许使用该功能的好友 QQ
+      friends: [123456789]
+      message:
+        contains: ["监控截图"]
+      single_flight:
+        enabled: true
+        key: "geek2api-monitor-screenshot"
+        notify: true
+        message: "Geek2Api 监控截图任务正在执行，请等待完成后再试。"
+      actions:
+        - ref: "geek2api-monitor-screenshot"
+
+# incoming/outgoing 共用的命名动作
+actions:
+  geek2api-monitor-screenshot:
+    type: "send_webpage_screenshot"
+    enabled: true
+
+    # 五个公共状态页候选；当前域名成功时保持使用，导航失败后按顺序切换
+    base_urls:
+      - "https://hk.geek2api.com"
+      - "https://hk2.geek2api.com"
+      - "https://hk3.geek2api.com"
+      - "https://hk4.geek2api.com"
+      - "https://hk5.geek2api.com"
+
+    # incoming 从请求体读取目标；outgoing 中变量为空，会自动回退到触发会话
+    group_id: "${request.body.group_id}"
+    friend_id: "${request.body.friend_id}"
+
+    # /status 是公共页面，不配置 auth，也不会打开系统登录或授权窗口
+    pending_message: "正在获取 Geek2Api 公共状态页截图..."
+    failure_message: "Geek2Api 公共状态页截图失败，请稍后重试。"
+    message: "Geek2Api 公共状态：\n"
+
+    # 单个截图项截取完整 main，包含概览、端点延迟和全部渠道卡片
+    screenshot:
+      parts:
+        # 保留 monitor-status id，兼容已有浏览器文本查询 API 调用方
+        - id: "monitor-status"
+          enabled: true
+          url: "https://hk.geek2api.com/status"
+          wait_until: "commit"
+          steps:
+            # URL 端点列表以及渠道卡片或合法空状态出现后，再截图完整 main
+            - op: "wait"
+              selector: '//*[@id="app"]/div[2]/main/section[2]/div[2]/div[1]/button'
+              state: "visible"
+              timeout_ms: 60000
+            - op: "wait"
+              selector: '(//*[@id="app"]/div[2]/main/div/div/div/button[1] | //*[@id="app"]/div[2]/main//div[contains(concat(" ", normalize-space(@class), " "), " empty-state ")])[1]'
+              state: "visible"
+              timeout_ms: 60000
+          selector: '//*[@id="app"]/div[2]/main'
+
+      # 就绪后再等待 3 秒；fixed header 在截图瞬间隐藏，避免覆盖 main 顶部
+      delay_before_ms: 3000
+      timeout_ms: 60000
+      font_wait_timeout_ms: 3000
+      hide_selectors: ["#app header"]
+      layout:
+        horizontal_align: "center"
+        gap_px: 0
+      # 可重试的浏览器超时/网络错误最多额外重试 2 次，共 3 次尝试
+      retry:
+        enabled: true
+        max_retries: 2
+        delay_ms: 1000

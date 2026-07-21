@@ -2,6 +2,7 @@ package kim.hhhhhy.x.webhook.action
 
 import com.microsoft.playwright.PlaywrightException
 import com.microsoft.playwright.TimeoutError
+import kim.hhhhhy.x.webhook.api.BrowserTextListRequest
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
 import kim.hhhhhy.x.webhook.config.PluginConfig
@@ -13,6 +14,7 @@ import kim.hhhhhy.x.webhook.model.RequestContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 import org.yaml.snakeyaml.Yaml
 import java.awt.Color
@@ -30,6 +32,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.imageio.ImageIO
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -38,6 +41,12 @@ import kotlin.test.assertTrue
 
 internal class WebPageScreenshotActionTest {
     private val config = PluginConfig.safeDefault()
+
+    @BeforeTest
+    fun resetBrowserWorker(): Unit {
+        WebPageScreenshotAction.reset()
+        WebPageScreenshotAction.open()
+    }
 
     @Test
     fun defaultYamlContainsReusableScreenshotAction(): Unit {
@@ -50,67 +59,123 @@ internal class WebPageScreenshotActionTest {
         val actions = root["actions"] as Map<*, *>
         val screenshotAction = actions["geek2api-monitor-screenshot"] as Map<*, *>
         val baseUrls = screenshotAction["base_urls"] as List<*>
-        val auth = screenshotAction["auth"] as Map<*, *>
-        val cliBridge = auth["cli_bridge"] as Map<*, *>
-        val localStorage = auth["local_storage"] as Map<*, *>
         val screenshot = screenshotAction["screenshot"] as Map<*, *>
         val parts = screenshot["parts"] as List<*>
-        val keysPart = parts[0] as Map<*, *>
-        val monitorPart = parts[1] as Map<*, *>
-        val monitorSteps = monitorPart["steps"] as List<*>
-        val readyStep = monitorSteps.last() as Map<*, *>
+        val mainPart = parts.single() as Map<*, *>
+        val readySteps = mainPart["steps"] as List<*>
+        val endpointReadyStep = readySteps[0] as Map<*, *>
+        val channelReadyStep = readySteps[1] as Map<*, *>
         val layout = screenshot["layout"] as Map<*, *>
         val screenshotRetry = screenshot["retry"] as Map<*, *>
 
         assertTrue(browser["enabled"] is Boolean)
         assertEquals(false, browser["session_cache_enabled"])
         assertEquals("browser-session-cache", browser["session_cache_dir"])
-        assertTrue("hk5.geek2api.com" in (browser["allowed_hosts"] as List<*>))
-        assertFalse("hk3.geek2api.com" in (browser["allowed_hosts"] as List<*>))
         assertEquals(
             listOf(
-                "https://hk5.geek2api.com",
+                "hk.geek2api.com",
+                "hk2.geek2api.com",
+                "hk3.geek2api.com",
+                "hk4.geek2api.com",
+                "hk5.geek2api.com"
+            ),
+            browser["allowed_hosts"]
+        )
+        assertEquals(
+            listOf(
                 "https://hk.geek2api.com",
                 "https://hk2.geek2api.com",
-                "https://hk4.geek2api.com"
+                "https://hk3.geek2api.com",
+                "https://hk4.geek2api.com",
+                "https://hk5.geek2api.com"
             ),
             baseUrls
         )
-        assertEquals("https://hk5.geek2api.com/api/v1/auth/cli-bridge/start", cliBridge["start_url"])
-        assertEquals("https://hk5.geek2api.com/cli-bridge", cliBridge["browser_url"])
-        assertEquals("https://hk5.geek2api.com/api/v1/auth/cli-bridge/poll", cliBridge["poll_url"])
-        assertEquals("https://hk5.geek2api.com/api/v1/user/profile", cliBridge["profile_url"])
-        assertEquals("https://hk5.geek2api.com/api/v1/auth/refresh", cliBridge["refresh_url"])
-        assertEquals(2500, cliBridge["poll_interval_ms"])
-        assertEquals(300000, cliBridge["max_wait_ms"])
-        assertEquals(null, auth["login"])
-        assertEquals("auth_token", localStorage["key"])
-        assertEquals("refresh_token", localStorage["refresh_token_key"])
-        assertEquals("token_expires_at", localStorage["expires_at_key"])
-        assertEquals("auth_user", localStorage["user_key"])
+        assertEquals(null, screenshotAction["auth"])
+        assertEquals(null, screenshotAction["session_key"])
         assertEquals(null, screenshotAction["steps"])
-        assertEquals(2, parts.size)
-        assertEquals("keys-overview", keysPart["id"])
-        assertEquals("https://hk5.geek2api.com/keys", keysPart["url"])
+        assertEquals(1, parts.size)
+        assertEquals("monitor-status", mainPart["id"])
+        assertEquals("https://hk.geek2api.com/status", mainPart["url"])
         assertEquals(
-            "//*[@id=\"app\"]/div[2]/div[2]/main/div/div[1]/div/section/div[2]",
-            keysPart["selector"]
+            "//*[@id=\"app\"]/div[2]/main",
+            mainPart["selector"]
         )
-        assertEquals("monitor-status", monitorPart["id"])
-        assertEquals("https://hk5.geek2api.com/monitor", monitorPart["url"])
-        assertEquals("wait", readyStep["op"])
-        assertEquals("visible", readyStep["state"])
-        assertEquals(90000, readyStep["timeout_ms"])
-        assertTrue(readyStep["selector"].toString().contains("min-h-[280px]"))
-        assertTrue(readyStep["selector"].toString().contains("empty-state"))
+        assertEquals(
+            "//*[@id=\"app\"]/div[2]/main/section[2]/div[2]/div[1]/button",
+            endpointReadyStep["selector"]
+        )
+        assertEquals("visible", endpointReadyStep["state"])
+        assertEquals(60000, endpointReadyStep["timeout_ms"])
+        assertEquals(
+            "(//*[@id=\"app\"]/div[2]/main/div/div/div/button[1] | " +
+                "//*[@id=\"app\"]/div[2]/main//div[contains(concat(\" \", normalize-space(@class), " +
+                "\" \"), \" empty-state \")])[1]",
+            channelReadyStep["selector"]
+        )
+        assertEquals("visible", channelReadyStep["state"])
+        assertEquals(60000, channelReadyStep["timeout_ms"])
         assertEquals(3000, screenshot["delay_before_ms"])
-        assertEquals(listOf("header.sticky"), screenshot["hide_selectors"])
-        assertEquals(60000, screenshot["font_wait_timeout_ms"])
+        assertEquals(60000, screenshot["timeout_ms"])
+        assertEquals(3000, screenshot["font_wait_timeout_ms"])
+        assertEquals(listOf("#app header"), screenshot["hide_selectors"])
         assertEquals("center", layout["horizontal_align"])
         assertEquals(0, layout["gap_px"])
         assertEquals(true, screenshotRetry["enabled"])
         assertEquals(2, screenshotRetry["max_retries"])
         assertEquals(1000, screenshotRetry["delay_ms"])
+    }
+
+    @Test
+    fun publicGeek2ApiStatusExampleIsValidAndRequiresNoSiteAuth(): Unit {
+        val example = File("examples/webhook_config.geek2api-status.yml")
+        assertTrue(example.isFile)
+        val root = example.inputStream().use { input ->
+            @Suppress("UNCHECKED_CAST")
+            Yaml().load<Map<String, Any?>>(input)
+        }
+        val browser = root["browser"] as Map<*, *>
+        val incoming = root["incoming"] as Map<*, *>
+        val outgoing = root["outgoing"] as Map<*, *>
+        val actions = root["actions"] as Map<*, *>
+        val action = actions["geek2api-monitor-screenshot"] as Map<*, *>
+        val screenshot = action["screenshot"] as Map<*, *>
+        val parts = screenshot["parts"] as List<*>
+        val mainPart = parts.single() as Map<*, *>
+        val readySteps = mainPart["steps"] as List<*>
+
+        assertEquals(false, browser["session_cache_enabled"])
+        assertEquals(
+            listOf(
+                "hk.geek2api.com",
+                "hk2.geek2api.com",
+                "hk3.geek2api.com",
+                "hk4.geek2api.com",
+                "hk5.geek2api.com"
+            ),
+            browser["allowed_hosts"]
+        )
+        assertEquals(
+            listOf(
+                "https://hk.geek2api.com",
+                "https://hk2.geek2api.com",
+                "https://hk3.geek2api.com",
+                "https://hk4.geek2api.com",
+                "https://hk5.geek2api.com"
+            ),
+            action["base_urls"]
+        )
+        assertEquals(null, action["auth"])
+        assertEquals(null, action["session_key"])
+        assertEquals(1, (incoming["endpoints"] as List<*>).size)
+        assertEquals(2, (outgoing["routes"] as List<*>).size)
+        assertEquals(1, parts.size)
+        assertEquals("monitor-status", mainPart["id"])
+        assertEquals("https://hk.geek2api.com/status", mainPart["url"])
+        assertEquals("//*[@id=\"app\"]/div[2]/main", mainPart["selector"])
+        assertEquals(2, readySteps.size)
+        assertTrue((readySteps[1] as Map<*, *>)["selector"].toString().contains("empty-state"))
+        assertEquals(listOf("#app header"), screenshot["hide_selectors"])
     }
 
     @Test
@@ -233,10 +298,9 @@ internal class WebPageScreenshotActionTest {
                 user = Json.parseToJsonElement("""{"id":1,"username":"cached-user"}""") as JsonObject
             )
         )
-        val storageState = WebPageScreenshotAction.mergeStorageState(
-            """{"cookies":[{"name":"session","value":"session-cookie","domain":"example.invalid","path":"/","expires":4102444800,"httpOnly":true,"secure":true,"sameSite":"Lax"}],"origins":[]}""",
-            authenticated
-        )
+        val cookieStorageState =
+            """{"cookies":[{"name":"session","value":"session-cookie","domain":"example.invalid","path":"/","expires":4102444800,"httpOnly":true,"secure":true,"sameSite":"Lax"}],"origins":[]}"""
+        val storageState = WebPageScreenshotAction.mergeStorageState(cookieStorageState, authenticated)
         val cache = BrowserSessionCache(directory)
         val sessionKey = "monitor/../../must-not-be-a-path"
 
@@ -245,9 +309,14 @@ internal class WebPageScreenshotActionTest {
             val cachePath = cache.cachePath(sessionKey)
             assertTrue(Files.isRegularFile(cachePath))
             assertFalse(cachePath.fileName.toString().contains("monitor"))
+            val cacheEnvelope = Json.parseToJsonElement(Files.readString(cachePath)) as JsonObject
+            assertEquals(2, cacheEnvelope["version"]?.jsonPrimitive?.content?.toInt())
+            assertTrue(cacheEnvelope["token_pair"] is JsonObject)
 
             val cached = requireNotNull(cache.load(sessionKey, unresolved))
             assertTrue(cached.storageState.contains("session-cookie"))
+            assertEquals("cached-access", cached.tokenPair?.accessToken)
+            assertEquals("cached-refresh", cached.tokenPair?.refreshToken)
             val restored = requireNotNull(WebPageScreenshotAction.restoreCachedSessionAuth(unresolved, cached))
             assertEquals("cached-access", restored.tokenPair?.accessToken)
             assertEquals("cached-refresh", restored.tokenPair?.refreshToken)
@@ -261,6 +330,39 @@ internal class WebPageScreenshotActionTest {
             val values = WebPageScreenshotAction.readStorageStateLocalStorage(merged, localStorage.origin)
             assertEquals("refreshed-access", values[localStorage.key])
             assertTrue(merged.contains("session-cookie"))
+
+            val explicitTokenSessionKey = "explicit-token-session"
+            cache.save(explicitTokenSessionKey, authenticated, cookieStorageState)
+            val explicitCached = requireNotNull(cache.load(explicitTokenSessionKey, unresolved))
+            assertFalse(explicitCached.storageState.contains("auth_token"))
+            val explicitRestored = requireNotNull(
+                WebPageScreenshotAction.restoreCachedSessionAuth(unresolved, explicitCached)
+            )
+            assertEquals("cached-access", explicitRestored.tokenPair?.accessToken)
+            val explicitMerged = WebPageScreenshotAction.mergeStorageState(
+                explicitCached.storageState,
+                explicitRestored
+            )
+            assertEquals(
+                "cached-access",
+                WebPageScreenshotAction.readStorageStateLocalStorage(explicitMerged, localStorage.origin)[localStorage.key]
+            )
+
+            val legacySessionKey = "legacy-v1-session"
+            cache.save(legacySessionKey, authenticated, storageState)
+            val legacyPath = cache.cachePath(legacySessionKey)
+            val versionTwoEnvelope = Json.parseToJsonElement(Files.readString(legacyPath)) as JsonObject
+            val versionOneEnvelope = JsonObject(
+                (versionTwoEnvelope - "token_pair") + ("version" to JsonPrimitive(1))
+            )
+            Files.writeString(legacyPath, versionOneEnvelope.toString())
+            val legacyCached = requireNotNull(cache.load(legacySessionKey, unresolved))
+            assertEquals(null, legacyCached.tokenPair)
+            val legacyRestored = requireNotNull(
+                WebPageScreenshotAction.restoreCachedSessionAuth(unresolved, legacyCached)
+            )
+            assertEquals("cached-access", legacyRestored.tokenPair?.accessToken)
+            assertEquals("cached-refresh", legacyRestored.tokenPair?.refreshToken)
 
             val cookieOnlySessionKey = "cookie-only-session"
             cache.save(cookieOnlySessionKey, null, storageState)
@@ -289,7 +391,57 @@ internal class WebPageScreenshotActionTest {
             "xpath=//*[@id=\"app\"]/main",
             WebPageScreenshotAction.normalizeSelector("//*[@id=\"app\"]/main")
         )
+        assertEquals(
+            "xpath=./div[5]/div[2]/div[last()]",
+            WebPageScreenshotAction.normalizeSelector("./div[5]/div[2]/div[last()]")
+        )
         assertEquals("#content", WebPageScreenshotAction.normalizeSelector("#content"))
+    }
+
+    @Test
+    fun authenticated401DetectionUsesExactTokenAndSkipsIssuingEndpoints(): Unit {
+        val tokenPair = BrowserTokenPair(
+            accessToken = "access-token",
+            refreshToken = "refresh-token",
+            expiresAtMillis = 123_456L,
+            tokenType = "Bearer",
+            user = JsonObject(emptyMap())
+        )
+        assertTrue(WebPageScreenshotAction.authorizationHeaderUsesToken("Bearer access-token", tokenPair))
+        assertTrue(WebPageScreenshotAction.authorizationHeaderUsesToken("bearer   access-token", tokenPair))
+        assertFalse(WebPageScreenshotAction.authorizationHeaderUsesToken("Bearer other-token", tokenPair))
+        assertFalse(WebPageScreenshotAction.authorizationHeaderUsesToken("Basic access-token", tokenPair))
+        assertFalse(WebPageScreenshotAction.authorizationHeaderUsesToken(null, tokenPair))
+
+        val auth = BrowserAuthSpec(
+            token = null,
+            tokenEnv = null,
+            headerName = null,
+            headerPrefix = "Bearer ",
+            headerHosts = emptyList(),
+            localStorage = BrowserLocalStorageAuth("https://example.invalid", "auth_token", ""),
+            cookie = null,
+            cliBridge = BrowserCliBridgeAuth(
+                startUrl = "https://example.invalid/api/v1/auth/cli-bridge/start",
+                browserUrl = "https://example.invalid/cli-bridge",
+                pollUrl = "https://example.invalid/api/v1/auth/cli-bridge/poll",
+                profileUrl = "https://example.invalid/api/v1/user/profile",
+                refreshUrl = "https://example.invalid/api/v1/auth/refresh",
+                pollIntervalMillis = 2_500L,
+                maxWaitMillis = 300_000L,
+                refreshBeforeExpirySeconds = 120L,
+                retryCooldownMillis = 60_000L
+            )
+        )
+        assertTrue(
+            WebPageScreenshotAction.isTokenIssuingUrl(
+                "https://example.invalid/api/v1/auth/refresh?retry=1",
+                auth
+            )
+        )
+        assertTrue(WebPageScreenshotAction.isTokenIssuingUrl("https://example.invalid/cli-bridge/", auth))
+        assertFalse(WebPageScreenshotAction.isTokenIssuingUrl("https://example.invalid/api/v1/user/profile", auth))
+        assertFalse(WebPageScreenshotAction.isTokenIssuingUrl("https://example.invalid/monitor", auth))
     }
 
     @Test
@@ -1564,6 +1716,65 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun publicGeek2ApiStatusConfigurationCapturesMainWithoutHeaderWhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_GEEK2API_STATUS_IT") != "true") return
+
+        val root = WebPageScreenshotActionTest::class.java.getResourceAsStream("/webhook_config.yml").use { input ->
+            requireNotNull(input)
+            @Suppress("UNCHECKED_CAST")
+            Yaml().load<Map<String, Any?>>(input)
+        }
+        val actionMap = ((root["actions"] as Map<*, *>)["geek2api-monitor-screenshot"] as Map<*, *>)
+        val action = ActionConfig(
+            id = "geek2api-monitor-screenshot",
+            type = actionMap["type"].toString(),
+            enabled = actionMap["enabled"] as Boolean,
+            params = actionMap.entries
+                .associate { (key, value) -> key.toString() to value }
+                .filterKeys { key -> key != "type" && key != "enabled" }
+        )
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            viewportWidth = 1280,
+            viewportHeight = 1400,
+            timeoutMillis = 60_000L,
+            allowedHosts = listOf(
+                "hk.geek2api.com",
+                "hk2.geek2api.com",
+                "hk3.geek2api.com",
+                "hk4.geek2api.com",
+                "hk5.geek2api.com"
+            )
+        )
+
+        try {
+            val bytes = runBlocking {
+                WebPageScreenshotAction.capture(
+                    action,
+                    ExecutionContext(config.copy(browser = browserConfig))
+                )
+            }
+            assertTrue(bytes.hasPngHeader())
+            val image = requireNotNull(ImageIO.read(ByteArrayInputStream(bytes)))
+            assertTrue(image.width >= 1_000)
+            assertTrue(image.height >= 1_200)
+            var darkPixelsInHeaderBand = 0
+            for (y in 0 until minOf(60, image.height)) {
+                for (x in 0 until image.width) {
+                    val color = Color(image.getRGB(x, y), true)
+                    if (color.alpha > 0 && color.red < 150 && color.green < 150 && color.blue < 150) {
+                        darkPixelsInHeaderBand += 1
+                    }
+                }
+            }
+            assertTrue(darkPixelsInHeaderBand < image.width / 2)
+        } finally {
+            WebPageScreenshotAction.close()
+        }
+    }
+
+    @Test
     fun screenshotHideSelectorsExcludeFixedHeaderWhenExplicitlyEnabled(): Unit {
         if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
 
@@ -2454,10 +2665,12 @@ internal class WebPageScreenshotActionTest {
                     )
                 }
             }
+            assertEquals(1, loginCalls.get())
             assertEquals(1, refreshCalls.get())
             assertEquals("refresh-1", lastRefreshBody.get()?.get("refresh_token")?.jsonPrimitive?.content)
 
             WebPageScreenshotAction.close()
+            WebPageScreenshotAction.open()
             val third = runBlocking {
                 WebPageScreenshotAction.capture(action, executionContext, emptyMap())
             }
@@ -2519,6 +2732,311 @@ internal class WebPageScreenshotActionTest {
             server.stop(0)
             sessionCacheDirectory.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun browserActionsRefreshOnceAfterAuthenticated401WhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val loginCalls = AtomicInteger()
+        val refreshCalls = AtomicInteger()
+        val lastRefreshToken = AtomicReference<String?>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/v1/auth/login") { exchange ->
+            val tokenNumber = loginCalls.incrementAndGet() * 2 - 1
+            exchange.respondJson(
+                200,
+                """{"code":0,"data":{"access_token":"access-$tokenNumber","refresh_token":"refresh-$tokenNumber","expires_in":3600,"token_type":"Bearer","user":{"id":$tokenNumber,"username":"tester"}}}"""
+            )
+        }
+        server.createContext("/api/v1/auth/login/2fa") { exchange ->
+            exchange.respondJson(400, """{"code":400,"message":"2FA not expected"}""")
+        }
+        server.createContext("/api/v1/auth/refresh") { exchange ->
+            refreshCalls.incrementAndGet()
+            val body = Json.parseToJsonElement(exchange.requestBody.bufferedReader().use { it.readText() }) as JsonObject
+            val refreshToken = body["refresh_token"]?.jsonPrimitive?.content.orEmpty()
+            lastRefreshToken.set(refreshToken)
+            val nextTokenNumber = refreshToken.removePrefix("refresh-").toInt() + 1
+            exchange.respondJson(
+                200,
+                """{"code":0,"data":{"access_token":"access-$nextTokenNumber","refresh_token":"refresh-$nextTokenNumber","expires_in":3600,"token_type":"Bearer"}}"""
+            )
+        }
+        server.createContext("/api/protected") { exchange ->
+            val tokenNumber = exchange.requestHeaders.getFirst("Authorization")
+                .orEmpty()
+                .removePrefix("Bearer access-")
+                .toIntOrNull()
+            if (tokenNumber != null && tokenNumber % 2 == 0) {
+                exchange.respondJson(200, """{"name":"Primary","status":"UP"}""")
+            } else {
+                exchange.respondJson(401, """{"message":"access token rejected"}""")
+            }
+        }
+        server.createContext("/monitor") { exchange -> exchange.respondHtml(protectedMonitorHtml()) }
+        server.start()
+
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val sessionCacheDirectory = Files.createTempDirectory("xaiwebhook-authenticated-401-it")
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            timeoutMillis = 5_000L,
+            sessionCacheEnabled = true,
+            sessionCacheDirectory = sessionCacheDirectory.toString(),
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val executionContext = ExecutionContext(config.copy(browser = browserConfig))
+
+        WebPageScreenshotAction.reset()
+        WebPageScreenshotAction.open()
+        try {
+            val queryAction = protectedCredentialAction(baseUrl, "401-query", "401-query-session")
+            val request = BrowserTextListRequest(
+                actionId = "401-query",
+                partId = "monitor-status",
+                itemSelector = ".item",
+                nameRelativeSelector = ".name",
+                statusRelativeSelector = ".status"
+            )
+            val firstQuery = runBlocking {
+                WebPageScreenshotAction.queryTextList(queryAction, executionContext, request, emptyMap())
+            }
+            assertEquals("UP", firstQuery.items.single().statusText)
+            assertEquals(1, loginCalls.get())
+            assertEquals(1, refreshCalls.get())
+            assertEquals("refresh-1", lastRefreshToken.get())
+
+            runBlocking {
+                WebPageScreenshotAction.queryTextList(queryAction, executionContext, request, emptyMap())
+            }
+            assertEquals(1, loginCalls.get())
+            assertEquals(1, refreshCalls.get())
+
+            val captureAction = protectedCredentialAction(baseUrl, "401-capture", "401-capture-session")
+            val image = runBlocking {
+                WebPageScreenshotAction.capture(captureAction, executionContext, emptyMap())
+            }
+            assertTrue(image.hasPngHeader())
+            assertEquals(2, loginCalls.get())
+            assertEquals(2, refreshCalls.get())
+            assertEquals("refresh-3", lastRefreshToken.get())
+
+            runBlocking {
+                WebPageScreenshotAction.capture(captureAction, executionContext, emptyMap())
+            }
+            assertEquals(2, loginCalls.get())
+            assertEquals(2, refreshCalls.get())
+        } finally {
+            WebPageScreenshotAction.reset()
+            server.stop(0)
+            sessionCacheDirectory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun browserActionsReLoginOnceWhenAuthenticated401RefreshFails(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val loginCalls = AtomicInteger()
+        val refreshCalls = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/v1/auth/login") { exchange ->
+            val tokenNumber = loginCalls.incrementAndGet()
+            exchange.respondJson(
+                200,
+                """{"code":0,"data":{"access_token":"access-$tokenNumber","refresh_token":"refresh-$tokenNumber","expires_in":3600,"token_type":"Bearer","user":{"id":$tokenNumber,"username":"tester"}}}"""
+            )
+        }
+        server.createContext("/api/v1/auth/login/2fa") { exchange ->
+            exchange.respondJson(400, """{"code":400,"message":"2FA not expected"}""")
+        }
+        server.createContext("/api/v1/auth/refresh") { exchange ->
+            refreshCalls.incrementAndGet()
+            exchange.respondJson(400, """{"code":400,"message":"refresh token rejected"}""")
+        }
+        server.createContext("/api/protected") { exchange ->
+            if (exchange.requestHeaders.getFirst("Authorization") == "Bearer access-2") {
+                exchange.respondJson(200, """{"name":"Primary","status":"UP"}""")
+            } else {
+                exchange.respondJson(401, """{"message":"access token rejected"}""")
+            }
+        }
+        server.createContext("/monitor") { exchange -> exchange.respondHtml(protectedMonitorHtml()) }
+        server.start()
+
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val sessionCacheDirectory = Files.createTempDirectory("xaiwebhook-authenticated-401-refresh-failure-it")
+        val executionContext = ExecutionContext(
+            config.copy(
+                browser = BrowserConfig.safeDefault().copy(
+                    enabled = true,
+                    channel = "msedge",
+                    timeoutMillis = 5_000L,
+                    sessionCacheEnabled = true,
+                    sessionCacheDirectory = sessionCacheDirectory.toString(),
+                    allowedHosts = listOf("127.0.0.1")
+                )
+            )
+        )
+        val action = protectedCredentialAction(baseUrl, "401-refresh-failure", "401-refresh-failure-session")
+
+        WebPageScreenshotAction.reset()
+        WebPageScreenshotAction.open()
+        try {
+            val image = runBlocking {
+                WebPageScreenshotAction.capture(action, executionContext, emptyMap())
+            }
+            assertTrue(image.hasPngHeader())
+            assertEquals(2, loginCalls.get())
+            assertEquals(1, refreshCalls.get())
+
+            runBlocking { WebPageScreenshotAction.capture(action, executionContext, emptyMap()) }
+            assertEquals(2, loginCalls.get())
+            assertEquals(1, refreshCalls.get())
+        } finally {
+            WebPageScreenshotAction.reset()
+            server.stop(0)
+            sessionCacheDirectory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun browserActionsStopAfterSecondAuthenticated401WhenExplicitlyEnabled(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val loginCalls = AtomicInteger()
+        val refreshCalls = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/v1/auth/login") { exchange ->
+            loginCalls.incrementAndGet()
+            exchange.respondJson(
+                200,
+                """{"code":0,"data":{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600,"token_type":"Bearer","user":{"id":1,"username":"tester"}}}"""
+            )
+        }
+        server.createContext("/api/v1/auth/login/2fa") { exchange ->
+            exchange.respondJson(400, """{"code":400,"message":"2FA not expected"}""")
+        }
+        server.createContext("/api/v1/auth/refresh") { exchange ->
+            refreshCalls.incrementAndGet()
+            exchange.respondJson(
+                200,
+                """{"code":0,"data":{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600,"token_type":"Bearer"}}"""
+            )
+        }
+        server.createContext("/api/protected") { exchange ->
+            exchange.respondJson(401, """{"message":"access token rejected"}""")
+        }
+        server.createContext("/monitor") { exchange -> exchange.respondHtml(protectedMonitorHtml()) }
+        server.start()
+
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val sessionCacheDirectory = Files.createTempDirectory("xaiwebhook-authenticated-401-repeat-it")
+        val executionContext = ExecutionContext(
+            config.copy(
+                browser = BrowserConfig.safeDefault().copy(
+                    enabled = true,
+                    channel = "msedge",
+                    timeoutMillis = 5_000L,
+                    sessionCacheEnabled = true,
+                    sessionCacheDirectory = sessionCacheDirectory.toString(),
+                    allowedHosts = listOf("127.0.0.1")
+                )
+            )
+        )
+        val action = protectedCredentialAction(baseUrl, "401-repeat", "401-repeat-session")
+
+        WebPageScreenshotAction.reset()
+        WebPageScreenshotAction.open()
+        try {
+            val error = assertFailsWith<IllegalStateException> {
+                runBlocking { WebPageScreenshotAction.capture(action, executionContext, emptyMap()) }
+            }
+            assertTrue(error.message.orEmpty().contains("remained unauthorized after refresh or re-login"))
+            assertEquals(1, loginCalls.get())
+            assertEquals(1, refreshCalls.get())
+            assertTrue(Files.list(sessionCacheDirectory).use { files -> files.findAny().isPresent })
+        } finally {
+            WebPageScreenshotAction.reset()
+            server.stop(0)
+            sessionCacheDirectory.toFile().deleteRecursively()
+        }
+    }
+
+    private fun protectedCredentialAction(baseUrl: String, id: String, sessionKey: String): ActionConfig {
+        return ActionConfig(
+            id = id,
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "session_key" to sessionKey,
+                "auth" to mapOf(
+                    "login" to mapOf(
+                        "url" to "$baseUrl/api/v1/auth/login",
+                        "email" to "tester@example.invalid",
+                        "password" to "password",
+                        "two_factor_url" to "$baseUrl/api/v1/auth/login/2fa",
+                        "refresh_url" to "$baseUrl/api/v1/auth/refresh",
+                        "retry_cooldown_ms" to 1_000
+                    ),
+                    "local_storage" to mapOf(
+                        "origin" to baseUrl,
+                        "key" to "auth_token",
+                        "refresh_token_key" to "refresh_token",
+                        "expires_at_key" to "token_expires_at",
+                        "user_key" to "auth_user"
+                    )
+                ),
+                "screenshot" to mapOf(
+                    "parts" to listOf(
+                        mapOf(
+                            "id" to "monitor-status",
+                            "url" to "$baseUrl/monitor",
+                            "steps" to listOf(
+                                mapOf(
+                                    "op" to "wait",
+                                    "selector" to "body.ready",
+                                    "state" to "visible",
+                                    "timeout_ms" to 5_000
+                                )
+                            ),
+                            "selector" to "#content",
+                            "timeout_ms" to 5_000
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private fun protectedMonitorHtml(): String {
+        return """
+            <!doctype html>
+            <html>
+            <head><title>Protected Monitor</title></head>
+            <body>
+              <main id="content" hidden>
+                <div class="item"><span class="name"></span><span class="status"></span></div>
+              </main>
+              <script>
+                ;(async () => {
+                  const token = localStorage.getItem('auth_token') || ''
+                  const response = await fetch('/api/protected', {
+                    headers: { Authorization: 'Bearer ' + token }
+                  })
+                  if (!response.ok) return
+                  const data = await response.json()
+                  document.querySelector('.name').textContent = data.name
+                  document.querySelector('.status').textContent = data.status
+                  document.body.classList.add('ready')
+                  document.getElementById('content').hidden = false
+                })()
+              </script>
+            </body>
+            </html>
+        """.trimIndent()
     }
 
     private fun HttpExchange.respondHtml(bodyText: String): Unit {
