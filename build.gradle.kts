@@ -68,6 +68,15 @@ tasks.test {
     useJUnitPlatform()
 }
 
+tasks.register<JavaExec>("codexRadarPreview") {
+    group = "verification"
+    description = "Fetch live Codex radar data and render the chart to build/codex-radar-preview.png"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("kim.hhhhhy.x.webhook.action.codex.CodexRadarPreview")
+    // 站点在部分网络下仅 IPv6 可达；可用 -Dcodex.proxy= 指定代理或置空直连
+    System.getProperty("codex.proxy")?.let { systemProperty("codex.proxy", it) }
+}
+
 tasks.register<JavaExec>("playwrightInstallChromium") {
     group = "playwright"
     description = "Install the Playwright Chromium browser runtime"

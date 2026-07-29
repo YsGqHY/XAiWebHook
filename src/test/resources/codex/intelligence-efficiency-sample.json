@@ -1,0 +1,196 @@
+{
+  "schema": 2,
+  "source_updated_at": "2026-07-29T23:33:20+08:00",
+  "points": [
+    {
+      "model": "gpt-5.6-sol",
+      "effort": "low",
+      "iq": 83.0357,
+      "passed": 62,
+      "valid_tasks": 112,
+      "average_price_usd": 2.020242,
+      "average_minutes": 11.4072,
+      "combined_cost_index": 0.0882
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effort": "medium",
+      "iq": 81.6964,
+      "passed": 61,
+      "valid_tasks": 112,
+      "average_price_usd": 3.64593,
+      "average_minutes": 17.4843,
+      "combined_cost_index": 0.5861
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "iq": 96.4286,
+      "passed": 72,
+      "valid_tasks": 112,
+      "average_price_usd": 4.887217,
+      "average_minutes": 21.9251,
+      "combined_cost_index": 1.5681
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "iq": 101.7857,
+      "passed": 76,
+      "valid_tasks": 112,
+      "average_price_usd": 6.412485,
+      "average_minutes": 23.8978,
+      "combined_cost_index": 2.6766
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effort": "max",
+      "iq": 99.1071,
+      "passed": 74,
+      "valid_tasks": 112,
+      "average_price_usd": 9.078747,
+      "average_minutes": 32.5636,
+      "combined_cost_index": 9.7467
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effort": "ultra",
+      "iq": 99.1071,
+      "passed": 74,
+      "valid_tasks": 112,
+      "average_price_usd": 24.992113,
+      "average_minutes": 50.1034,
+      "combined_cost_index": 100.0
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effort": "low",
+      "iq": 41.5179,
+      "passed": 31,
+      "valid_tasks": 112,
+      "average_price_usd": 0.552245,
+      "average_minutes": 7.5444,
+      "combined_cost_index": 0.0068
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effort": "medium",
+      "iq": 53.5714,
+      "passed": 40,
+      "valid_tasks": 112,
+      "average_price_usd": 0.74023,
+      "average_minutes": 8.3548,
+      "combined_cost_index": 0.0125
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+      "iq": 68.3036,
+      "passed": 51,
+      "valid_tasks": 112,
+      "average_price_usd": 1.370032,
+      "average_minutes": 13.0846,
+      "combined_cost_index": 0.0909
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effort": "xhigh",
+      "iq": 85.7143,
+      "passed": 64,
+      "valid_tasks": 112,
+      "average_price_usd": 2.554555,
+      "average_minutes": 19.076,
+      "combined_cost_index": 0.5359
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effort": "max",
+      "iq": 93.75,
+      "passed": 70,
+      "valid_tasks": 112,
+      "average_price_usd": 4.768782,
+      "average_minutes": 28.8369,
+      "combined_cost_index": 3.5324
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effort": "ultra",
+      "iq": 99.1071,
+      "passed": 74,
+      "valid_tasks": 112,
+      "average_price_usd": 14.602291,
+      "average_minutes": 45.7308,
+      "combined_cost_index": 44.2111
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "effort": "low",
+      "iq": 4.0179,
+      "passed": 3,
+      "valid_tasks": 112,
+      "average_price_usd": 0.161567,
+      "average_minutes": 5.687,
+      "combined_cost_index": 0.0008
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "effort": "medium",
+      "iq": 30.8036,
+      "passed": 23,
+      "valid_tasks": 112,
+      "average_price_usd": 0.411962,
+      "average_minutes": 10.298,
+      "combined_cost_index": 0.0132
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "effort": "high",
+      "iq": 69.6429,
+      "passed": 52,
+      "valid_tasks": 112,
+      "average_price_usd": 1.110416,
+      "average_minutes": 20.3106,
+      "combined_cost_index": 0.2821
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "effort": "xhigh",
+      "iq": 75.0,
+      "passed": 56,
+      "valid_tasks": 112,
+      "average_price_usd": 1.521002,
+      "average_minutes": 24.8339,
+      "combined_cost_index": 0.7139
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "effort": "max",
+      "iq": 84.375,
+      "passed": 63,
+      "valid_tasks": 112,
+      "average_price_usd": 2.377601,
+      "average_minutes": 33.5622,
+      "combined_cost_index": 2.7991
+    },
+    {
+      "model": "gpt-5.5",
+      "effort": "high",
+      "iq": 83.0357,
+      "passed": 62,
+      "valid_tasks": 112,
+      "average_price_usd": 3.864071,
+      "average_minutes": 18.1664,
+      "combined_cost_index": 0.6982
+    },
+    {
+      "model": "gpt-5.5",
+      "effort": "xhigh",
+      "iq": 97.7679,
+      "passed": 73,
+      "valid_tasks": 112,
+      "average_price_usd": 5.907213,
+      "average_minutes": 24.5206,
+      "combined_cost_index": 2.6672
+    }
+  ]
+}
