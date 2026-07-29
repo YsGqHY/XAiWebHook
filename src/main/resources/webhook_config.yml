@@ -227,6 +227,34 @@ outgoing:
       actions:
         - ref: "geek2api-monitor-screenshot"
 
+    # 群成员发送“降智检测”时抓取 Codex 雷达数据，回复建议文本并附上重绘图表
+    - id: "codex-degradation-command"
+      # 默认开启；本路由只做 HTTP 拉取与本地绘图，不依赖 browser.enabled
+      enabled: true
+      events: ["group_message"]
+      # 留空表示不限制群；生产环境可填入允许触发的群号列表
+      groups: []
+      message:
+        # 任意满足即触发
+        contains: ["降智检测"]
+        starts_with: ["降智检测", "智商检测"]
+      # 单飞避免同一时间重复抓取与重复绘图
+      single_flight:
+        enabled: true
+        key: "codex-degradation-report"
+        notify: true
+        message: "降智检测正在执行，请等待完成后再试。"
+      cooldown:
+        enabled: true
+        # 数据源每约 4 小时更新一次观察点，个人冷却设为 120 秒足够
+        personal_ms: 120000
+        administrator_ms: 15000
+        global_ms: 10000
+        notify: true
+        message: "降智检测冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        - ref: "codex-degradation-report"
+
     - id: "friend-message-forward"
       enabled: false
       events: ["friend_message"]
@@ -244,6 +272,96 @@ outgoing:
 
 # actions：可复用的命名动作，incoming/outgoing 可用字符串名或 ref 引用
 actions:
+  # 降智检测：抓取 Codex 雷达数据，输出每个模型的换档建议，并重绘图表发送到会话
+  codex-degradation-report:
+    type: "send_codex_radar_report"
+    # 默认开启；本动作仅做 HTTP 拉取与本地 HTML 绘图，不需要 browser.enabled
+    enabled: true
+    # 智力效率主数据源（静态快照，schema=2，约 370KB）。
+    # points 为 19 个「模型 × 思考档位」聚合点，含 iq、均价、均耗时与综合成本指数，
+    # 是站点「智力效率」面板的数据源，也是本动作 IQ 与评级的唯一主数据。
+    efficiency_url: "https://codexradar.com/data/intelligence-efficiency.json?refresh=1"
+    # 洞察接口（约 29KB）。提供 recommendations 站长推荐分组，
+    # 以及 degradation_alerts 降智预警（每个档位只与自身 24h/48h 历史比较得出）。
+    insights_url: "https://codexradar.com/api/radar-insights?refresh=1"
+    # 说明：https://codexradar.com/api/intelligence-efficiency?refresh=1 是原始逐题评测矩阵
+    # （约 1.9MB，含 tasks/cells/combos 与每次跑分的贡献者明细）。
+    # 聚合结论已由上面两个接口提供，故本动作默认不拉取该接口，避免每次触发传输 1.9MB。
+    # HTTP 代理地址，例如 http://127.0.0.1:7890；留空表示直连。
+    # 注意：codexradar.com 在部分网络环境下仅 IPv6 可达，而 JVM 默认优先 IPv4，
+    # 表现为 connect timeout。若日志报连接超时，可在此填入可用代理，
+    # 或给 mirai 启动参数加上 -Djava.net.preferIPv6Addresses=true。
+    proxy: ""
+    # incoming 可通过请求体指定群号；outgoing 中变量为空时自动回退到触发事件所在会话
+    group_id: "${request.body.group_id}"
+    # incoming 可通过请求体指定好友号；group_id 和 friend_id 不能同时有效
+    friend_id: "${request.body.friend_id}"
+    # 开始抓取前的提示语，留空则不发送
+    pending_message: "正在检测 Codex 各模型智商状态..."
+    # 抓取或绘图失败时发送的脱敏提示，详细原因仅写控制台日志
+    failure_message: "降智检测失败，请稍后重试。"
+    # 是否包含文本建议，默认 true
+    # 注意：send_text 与 send_chart 的结果会合并为同一条消息发送，
+    # 两者都为 true 时消息内为「建议文本 + 图表图片」；两者都为 false 时不发送任何消息
+    send_text: true
+    # 是否包含重绘的图表图片，默认 true
+    send_chart: true
+    # 文本建议的首行，默认“建议：”
+    advice_header: "建议："
+    # 降智判定参数
+    advice:
+      # 判定「智商正常」的 IQ 下限，默认 90（对齐站点推荐规则的性价比位下限）
+      target_iq: 90
+      # 评级「优秀」的 IQ 下限，默认 96（对齐站点推荐规则的聪明位下限）
+      excellent_iq: 96
+      # 评级「正常」的 IQ 下限，默认跟随 target_iq，保持评级与判定口径一致
+      normal_iq: 90
+      # 评级「观察」的 IQ 下限，低于该值记为「偏低」，默认 80
+      watch_iq: 80
+      # 作为日常基准的思考档位，默认 high；该档位达标且无降智预警即判定为智商正常
+      baseline_effort: "high"
+      # 建议档位选取策略：highest 取该模型最高档位（默认），cheapest 取达标且综合成本最低的档位
+      strategy: "highest"
+      # 建议文本模板。{model} 为模型名，{effort} 为思考档位中文名
+      normal_template: "{model} 智商正常。"
+      switch_template: "{model}：建议换{effort}。"
+      # 全部档位都达不到 target_iq 时使用
+      degraded_template: "{model}：全档位降智，建议换{effort}或暂避。"
+      # 该模型无任何档位数据时使用
+      unknown_template: "{model}：暂无数据。"
+    # 展示名与档位映射
+    labels:
+      # 思考档位从低到高的顺序，用于 highest 策略与卡片排序
+      effort_order: ["low", "medium", "high", "xhigh", "max", "ultra"]
+      # 思考档位中文名，键为接口返回的 effort 原值
+      effort:
+        low: "轻度思考"
+        medium: "中度思考"
+        high: "高度思考"
+        xhigh: "极高思考"
+        max: "极致思考"
+        ultra: "超限思考"
+      # 模型展示名，键为接口返回的 model 原值
+      model:
+        gpt-5.6-sol: "GPT-5.6 Sol"
+        gpt-5.6-terra: "GPT-5.6 Terra"
+        gpt-5.6-luna: "GPT-5.6 Luna"
+        gpt-5.5: "GPT-5.5"
+      # 模型在图表与建议中的展示顺序；未列出的模型按名称排在其后
+      model_order: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
+    # 图表外观
+    chart:
+      # 图表主标题
+      title: "Codex 降智检测"
+      # 副标题
+      subtitle: "CODEX INTELLIGENCE RADAR · 社区真实任务盲测"
+      # 建议区块标题
+      advice_title: "建议"
+      # 页脚免责说明
+      footer: "数据来自 Codex 雷达 codexradar.com · 分数由社区盲测汇总，不代表官方结论"
+      # 图表渲染宽度（像素），默认 1680，范围 900-3000；实际输出为 2 倍超采样
+      width_px: 1680
+
   # Geek2Api 公共状态页截图示例；/status 无需登录，可查看渠道状态和各 URL 端点延迟
   geek2api-monitor-screenshot:
     type: "send_webpage_screenshot"
