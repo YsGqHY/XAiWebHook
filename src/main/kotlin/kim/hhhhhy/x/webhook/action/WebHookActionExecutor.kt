@@ -13,12 +13,19 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.content.TextContent
 import io.ktor.serialization.kotlinx.json.json
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.action.codex.CodexRadarAction
+import kim.hhhhhy.x.webhook.action.codex.CodexRadarAdvisor
+import kim.hhhhhy.x.webhook.action.codex.CodexRadarChart
+import kim.hhhhhy.x.webhook.action.codex.CodexRadarOptionsParser
+import kim.hhhhhy.x.webhook.action.codex.CodexRadarTime
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ActionResult
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.IncomingMessageSegment
 import kim.hhhhhy.x.webhook.template.TemplateEngine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -99,6 +106,7 @@ internal object WebHookActionExecutor {
             clientRef?.close()
             clientRef = null
         }
+        CodexRadarAction.close()
         WebPageScreenshotAction.close()
     }
 
@@ -107,6 +115,7 @@ internal object WebHookActionExecutor {
             "send_group_message" -> sendGroupMessage(action, context)
             "send_friend_message" -> sendFriendMessage(action, context)
             "send_webpage_screenshot" -> sendWebpageScreenshot(action, context)
+            "send_codex_radar_report" -> sendCodexRadarReport(action, context)
             "http_request" -> httpRequest(action, context)
             "execute_command" -> executeCommand(action, context)
             "reply" -> reply(action, context)
@@ -182,6 +191,72 @@ internal object WebHookActionExecutor {
                 type = action.type,
                 success = false,
                 message = error.message?.take(500) ?: "webpage screenshot failed",
+                status = 500
+            )
+        }
+    }
+
+    /**
+     * 降智检测：拉取 codexradar 数据，生成建议文本与图表图片并发送到会话。
+     * 目标会话解析复用截图动作的规则（group_id / friend_id / 事件回退）。
+     */
+    private suspend fun sendCodexRadarReport(action: ActionConfig, context: ExecutionContext): ActionResult {
+        val target = resolveScreenshotTarget(action, context)
+        val contact = screenshotContact(target)
+        val pendingMessage = renderString(action.params["pending_message"], context)
+        val failureMessage = renderString(action.params["failure_message"], context)
+        val sendChart = action.params["send_chart"]?.let { renderBoolean(it, context) } ?: true
+        val sendText = action.params["send_text"]?.let { renderBoolean(it, context) } ?: true
+
+        return try {
+            if (pendingMessage.isNotBlank()) {
+                contact.sendMessage(PlainText(pendingMessage))
+            }
+
+            val spec = CodexRadarAction.fetchSpec(action) { renderString(it, context) }
+            val snapshot = CodexRadarAction.fetchSnapshot(spec)
+            val advisor = CodexRadarAdvisor(CodexRadarOptionsParser.adviceOptions(action.params))
+            val report = advisor.build(snapshot, CodexRadarTime.now())
+
+            // 建议文本与图表合并为一条消息发送：分两条会在群里割裂成两个气泡，
+            // 且图片先到时文本会失去上下文
+            val builder = MessageChainBuilder()
+            if (sendText) {
+                val header = renderString(action.params["advice_header"], context)
+                    .ifBlank { "建议：" }
+                builder.append(PlainText(report.adviceText(header)))
+            }
+            if (sendChart) {
+                val chart = CodexRadarChart(advisor, CodexRadarOptionsParser.chartOptions(action.params))
+                // HTML 渲染是 CPU 密集型同步操作，放到独立线程避免阻塞事件循环
+                val bytes = withContext(Dispatchers.IO) { HtmlImageRenderer.render(chart.render(report)) }
+                val image = bytes.toExternalResource("png").use { resource ->
+                    contact.uploadImage(resource)
+                }
+                // 文本与图片之间补一个换行，避免图片紧贴最后一行文字
+                if (sendText) builder.append(PlainText("\n"))
+                builder.append(image)
+            }
+            if (builder.isNotEmpty()) {
+                contact.sendMessage(builder.build())
+            }
+
+            WebHookDebug.log(
+                "[XAiWebHook] [降智检测] 报告发送成功：档位=${snapshot.tiers.size} 预警=${snapshot.alerts.size}"
+            )
+            ActionResult(action.type, success = true, message = "sent codex radar report", status = 200)
+        } catch (error: Throwable) {
+            XAiWebHook.logger.error("Codex radar report action failed id=${action.id ?: "(inline)"}", error)
+            if (failureMessage.isNotBlank()) {
+                runCatching { contact.sendMessage(PlainText(failureMessage)) }
+                    .onFailure { sendError ->
+                        XAiWebHook.logger.warning("Failed to send codex radar failure message: ${sendError.message}")
+                    }
+            }
+            ActionResult(
+                type = action.type,
+                success = false,
+                message = error.message?.take(500) ?: "codex radar report failed",
                 status = 500
             )
         }
