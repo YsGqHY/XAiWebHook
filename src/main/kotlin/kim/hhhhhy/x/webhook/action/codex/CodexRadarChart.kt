@@ -63,7 +63,8 @@ internal class CodexRadarChart(
         if (report.alerts.isEmpty()) return ""
         val rows = report.alerts.take(4).joinToString("") { alert ->
             val name = escape(
-                advisor.modelLabel(alert.model) + " " + advisor.effortLabel(alert.effort)
+                advisor.modelLabel(alert.model) + " " + advisor.effortLabel(alert.effort) +
+                    " " + advisor.officialEffortLabel(alert.effort)
             )
             val drops = listOfNotNull(
                 alert.dropFrom24h?.let { "24h -" + String.format("%.1f", it) },
@@ -134,7 +135,8 @@ internal class CodexRadarChart(
         }
         return """
             <td class="$classes">
-              <div class="cell-effort">${escape(advisor.effortLabel(tier.effort))}$mark</div>
+              <div class="cell-effort">${escape(advisor.effortLabel(tier.effort))}<span
+                class="cell-effort-official">${escape(advisor.officialEffortLabel(tier.effort))}</span>$mark</div>
               <div class="cell-iq" style="color:${resolved.color}">${formatIq(tier.iq)}</div>
               <div class="cell-grade" style="color:${resolved.color}">${escape(resolved.label)}</div>
               <div class="cell-meta">${formatPrice(tier.priceUsd)} · ${formatMinutes(tier.minutes)}</div>
@@ -145,7 +147,9 @@ internal class CodexRadarChart(
     private fun verdictBadge(advice: RadarModelAdvice): String {
         val (text, css) = when (advice.verdict) {
             RadarVerdict.NORMAL -> "智商正常" to "vb-ok"
-            RadarVerdict.SWITCH -> "建议换" + advisor.effortLabel(advice.target?.effort.orEmpty()) to "vb-warn"
+            RadarVerdict.SWITCH -> advice.target?.effort.orEmpty().let { effort ->
+                "建议换" + advisor.effortLabel(effort) + " " + advisor.officialEffortLabel(effort)
+            } to "vb-warn"
             RadarVerdict.DEGRADED -> "全档位降智" to "vb-bad"
             RadarVerdict.UNKNOWN -> "暂无数据" to "vb-none"
         }
@@ -177,6 +181,7 @@ internal class CodexRadarChart(
                 // 与档位卡片的聚合值有零点几差异，统一以卡片值为准
                 val iq = report.tierOf(item.key)?.iq ?: item.iq
                 advisor.modelLabel(item.model) + " " + advisor.effortLabel(item.effort) +
+                    " " + advisor.officialEffortLabel(item.effort) +
                     (iq?.let { " " + formatIq(it) } ?: "")
             }
             """<tr><td class="ft-k">${escape(group.title)}</td><td class="ft-v">${escape(items)}</td></tr>"""
@@ -268,6 +273,12 @@ internal class CodexRadarChart(
         .cell-alert { border: 2px solid #f87171; background: #fef2f2; }
         .cell-pick { border: 2px solid #34d399; background: #f0fdf4; }
         .cell-effort { color: #475467; font-size: 15px; font-weight: 700; }
+        /* 官方名用等宽字体弱化显示，与中文名区分，便于直接照抄为传参值 */
+        .cell-effort-official {
+          margin-left: 5px; color: #98a2b3;
+          font-family: "Consolas", "JetBrains Mono", "Courier New", monospace;
+          font-size: 13px; font-weight: 400;
+        }
         .cell-iq { margin-top: 4px; font-size: 33px; font-weight: 700; line-height: 1.1; }
         .cell-grade { margin-top: 2px; font-size: 15px; font-weight: 700; }
         .cell-meta { margin-top: 4px; color: #98a2b3; font-size: 14px; }
