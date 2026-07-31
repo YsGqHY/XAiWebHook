@@ -21,13 +21,15 @@ internal data class CodexRadarAdviceOptions(
     val effortOrder: List<String> = DEFAULT_EFFORT_ORDER,
     /** 思考档位中文名。 */
     val effortLabels: Map<String, String> = DEFAULT_EFFORT_LABELS,
+    /** 思考档位的 OpenAI 官方名，即 reasoning effort 取值，也是 CLI/API 实际传参值。 */
+    val officialEffortLabels: Map<String, String> = DEFAULT_OFFICIAL_EFFORT_LABELS,
     /** 模型展示名。 */
     val modelLabels: Map<String, String> = DEFAULT_MODEL_LABELS,
     /** 模型展示顺序。 */
     val modelOrder: List<String> = DEFAULT_MODEL_ORDER,
     val normalTemplate: String = "{model} 智商正常。",
-    val switchTemplate: String = "{model}：建议换{effort}。",
-    val degradedTemplate: String = "{model}：全档位降智，建议换{effort}或暂避。",
+    val switchTemplate: String = "{model}：建议换{effort}（{effort_official}）。",
+    val degradedTemplate: String = "{model}：全档位降智，建议换{effort}（{effort_official}）或暂避。",
     val unknownTemplate: String = "{model}：暂无数据。"
 ) {
     internal companion object {
@@ -46,6 +48,20 @@ internal data class CodexRadarAdviceOptions(
             "xhigh" to "极高思考",
             "max" to "极致思考",
             "ultra" to "超限思考"
+        )
+
+        /**
+         * OpenAI 官方档位名，与 reasoning effort 取值一致。
+         * 该值可直接用于 CLI 的 model_reasoning_effort 与 API 请求参数，
+         * 因此在图表和建议里同时给出中文名与官方名，便于直接照抄。
+         */
+        val DEFAULT_OFFICIAL_EFFORT_LABELS: Map<String, String> = mapOf(
+            "low" to "low",
+            "medium" to "medium",
+            "high" to "high",
+            "xhigh" to "xhigh",
+            "max" to "max",
+            "ultra" to "ultra"
         )
 
         val DEFAULT_MODEL_LABELS: Map<String, String> = mapOf(

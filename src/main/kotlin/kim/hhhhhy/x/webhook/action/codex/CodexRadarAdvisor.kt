@@ -48,6 +48,10 @@ internal class CodexRadarAdvisor(private val options: CodexRadarAdviceOptions) {
     fun effortLabel(effort: String): String =
         options.effortLabels[effort.lowercase()] ?: effort
 
+    /** 档位的 OpenAI 官方名；未配置映射时回退到接口原值。 */
+    fun officialEffortLabel(effort: String): String =
+        options.officialEffortLabels[effort.lowercase()] ?: effort.lowercase()
+
     fun modelLabel(model: String): String =
         options.modelLabels[model.lowercase()] ?: model
 
@@ -108,6 +112,7 @@ internal class CodexRadarAdvisor(private val options: CodexRadarAdviceOptions) {
                 alerts = alerts,
                 advice = options.degradedTemplate
                     .replace("{model}", label)
+                    .replace("{effort_official}", officialEffortLabel(fallback?.effort.orEmpty()))
                     .replace("{effort}", effortLabel(fallback?.effort.orEmpty()))
             )
         }
@@ -126,6 +131,7 @@ internal class CodexRadarAdvisor(private val options: CodexRadarAdviceOptions) {
             alerts = alerts,
             advice = options.switchTemplate
                 .replace("{model}", label)
+                .replace("{effort_official}", officialEffortLabel(target.effort))
                 .replace("{effort}", effortLabel(target.effort))
         )
     }
