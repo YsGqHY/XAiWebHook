@@ -322,11 +322,12 @@ actions:
       baseline_effort: "high"
       # 建议档位选取策略：highest 取该模型最高档位（默认），cheapest 取达标且综合成本最低的档位
       strategy: "highest"
-      # 建议文本模板。{model} 为模型名，{effort} 为思考档位中文名
+      # 建议文本模板。{model} 为模型名，{effort} 为思考档位中文名，
+      # {effort_official} 为 OpenAI 官方档位名（即 reasoning effort 取值）
       normal_template: "{model} 智商正常。"
-      switch_template: "{model}：建议换{effort}。"
+      switch_template: "{model}：建议换{effort}（{effort_official}）。"
       # 全部档位都达不到 target_iq 时使用
-      degraded_template: "{model}：全档位降智，建议换{effort}或暂避。"
+      degraded_template: "{model}：全档位降智，建议换{effort}（{effort_official}）或暂避。"
       # 该模型无任何档位数据时使用
       unknown_template: "{model}：暂无数据。"
     # 展示名与档位映射
@@ -341,6 +342,17 @@ actions:
         xhigh: "极高思考"
         max: "极致思考"
         ultra: "超限思考"
+      # 思考档位的 OpenAI 官方名，即 reasoning effort 取值。
+      # 该值可直接填入 Codex CLI 的 model_reasoning_effort 或 API 请求参数，
+      # 因此图表卡片与建议文本会在中文名旁同时给出官方名，便于直接照抄。
+      # 默认与接口返回的 effort 原值一致；如需改为大写或加前缀可在此覆盖。
+      effort_official:
+        low: "low"
+        medium: "medium"
+        high: "high"
+        xhigh: "xhigh"
+        max: "max"
+        ultra: "ultra"
       # 模型展示名，键为接口返回的 model 原值
       model:
         gpt-5.6-sol: "GPT-5.6 Sol"

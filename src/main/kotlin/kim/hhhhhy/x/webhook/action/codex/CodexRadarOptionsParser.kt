@@ -19,6 +19,8 @@ internal object CodexRadarOptionsParser {
             strategy = CodexRadarStrategy.parse(advice.string("strategy")),
             effortOrder = labels.stringList("effort_order").ifEmpty { defaults.effortOrder },
             effortLabels = labels.stringMap("effort").ifEmpty { defaults.effortLabels },
+            officialEffortLabels = labels.stringMap("effort_official")
+                .ifEmpty { defaults.officialEffortLabels },
             modelLabels = labels.stringMap("model").ifEmpty { defaults.modelLabels },
             modelOrder = labels.stringList("model_order").ifEmpty { defaults.modelOrder },
             normalTemplate = advice.string("normal_template") ?: defaults.normalTemplate,
