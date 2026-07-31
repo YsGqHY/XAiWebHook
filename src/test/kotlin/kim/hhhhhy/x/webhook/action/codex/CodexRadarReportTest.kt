@@ -121,7 +121,7 @@ internal class CodexRadarReportTest {
         // Terra high=70.98 未达标且命中降智预警 -> 升到最高档位 ultra
         val terra = report.advices.single { it.model == "gpt-5.6-terra" }
         assertEquals(RadarVerdict.SWITCH, terra.verdict)
-        assertEquals("GPT-5.6 Terra：建议换超限思考。", terra.advice)
+        assertEquals("GPT-5.6 Terra：建议换超限思考（ultra）。", terra.advice)
 
         // Luna 全档位最高仅 88.39 -> 全档位降智，回退到 max
         val luna = report.advices.single { it.model == "gpt-5.6-luna" }
@@ -131,7 +131,7 @@ internal class CodexRadarReportTest {
         // GPT-5.5 high=80.36 未达标，xhigh=96.43 达标 -> 换极高思考
         val gpt55 = report.advices.single { it.model == "gpt-5.5" }
         assertEquals(RadarVerdict.SWITCH, gpt55.verdict)
-        assertEquals("GPT-5.5：建议换极高思考。", gpt55.advice)
+        assertEquals("GPT-5.5：建议换极高思考（xhigh）。", gpt55.advice)
 
         // 模型顺序遵循 model_order
         assertEquals(
@@ -185,6 +185,11 @@ internal class CodexRadarReportTest {
         assertEquals(CodexRadarStrategy.HIGHEST, advice.strategy)
         assertEquals("超限思考", advice.effortLabels.getValue("ultra"))
         assertEquals("极致思考", advice.effortLabels.getValue("max"))
+        // 六个档位的官方名必须全部在 YAML 中声明
+        assertEquals(6, advice.officialEffortLabels.size)
+        listOf("low", "medium", "high", "xhigh", "max", "ultra").forEach { effort ->
+            assertEquals(effort, advice.officialEffortLabels.getValue(effort))
+        }
         assertEquals("GPT-5.6 Sol", advice.modelLabels.getValue("gpt-5.6-sol"))
 
         val chart = CodexRadarOptionsParser.chartOptions(action.params)
@@ -261,6 +266,37 @@ internal class CodexRadarReportTest {
     }
 
     /**
+     * 六个档位都必须给出 OpenAI 官方名（reasoning effort 取值），
+     * 该值要能直接填入 Codex CLI 的 model_reasoning_effort 或 API 参数。
+     */
+    @Test
+    fun everyEffortTierExposesOfficialOpenAiName(): Unit {
+        val advisor = CodexRadarAdvisor(CodexRadarAdviceOptions())
+        val expected = mapOf(
+            "low" to ("轻度思考" to "low"),
+            "medium" to ("中度思考" to "medium"),
+            "high" to ("高度思考" to "high"),
+            "xhigh" to ("极高思考" to "xhigh"),
+            "max" to ("极致思考" to "max"),
+            "ultra" to ("超限思考" to "ultra")
+        )
+        expected.forEach { (effort, labels) ->
+            assertEquals(labels.first, advisor.effortLabel(effort), "中文名 $effort")
+            assertEquals(labels.second, advisor.officialEffortLabel(effort), "官方名 $effort")
+        }
+
+        // 未知档位回退到接口原值的小写形式，不抛错
+        assertEquals("brandnew", advisor.officialEffortLabel("BrandNew"))
+
+        // 图表卡片需同时渲染中文名与官方名
+        val html = CodexRadarChart(advisor, CodexRadarChartOptions())
+            .render(advisor.build(snapshot(), "07-29 18:53"))
+        assertTrue(html.contains("cell-effort-official"), "卡片应含官方名节点")
+        assertTrue(html.contains(">ultra</span>"), "卡片应渲染官方名 ultra")
+        assertTrue(html.contains(">high</span>"), "卡片应渲染官方名 high")
+    }
+
+    /**
      * 「建议」标签语义是「换到这一档」。NORMAL 判定下 advice.target 等于基准档位，
      * 若照打标签会与分段徽标「智商正常」自相矛盾，因此只有 SWITCH/DEGRADED 才打。
      */
@@ -308,7 +344,7 @@ internal class CodexRadarReportTest {
         val html = CodexRadarChart(advisor, CodexRadarChartOptions()).render(report)
         val footerValue = Regex("""<td class="ft-v">([^<]*)</td>""")
             .find(html)?.groupValues?.get(1)?.trim()
-        assertEquals("GPT-5.6 Sol 高度思考 95.1", footerValue)
+        assertEquals("GPT-5.6 Sol 高度思考 high 95.1", footerValue)
     }
 
     @Test
