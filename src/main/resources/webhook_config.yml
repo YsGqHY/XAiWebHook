@@ -87,6 +87,36 @@ logging:
   # 默认 false；排查问题时开启，会在控制台打印大量信息，生产环境建议关闭
   debug: false
 
+# Model Plaza 查询设置（Geek2Api 模型广场功能）
+model_plaza:
+  # 是否启用 Model Plaza 查询功能，默认 false
+  enabled: false
+  # Geek2Api 入口 URL；程序会直连同入口的 /api/v1/model-plaza，并按 hk → hk2 → hk3 → hk4 → hk5 故障转移
+  base_url: "https://hk.geek2api.com/model-plaza"
+  # API 查询超时时间（毫秒），默认 30000，范围 5000-120000
+  timeout_ms: 30000
+  # CLI Bridge 认证配置；接口请求会携带登录 JWT，并复用原 playwright-storage-state.json 中的 Cookie，响应更新会原子回写
+  # 使用 CLI Bridge 在系统浏览器中登录，无需在配置中存储密码
+  auth:
+    # CLI Bridge 会话发起接口
+    start_url: "https://hk.geek2api.com/api/v1/auth/cli-bridge/start"
+    # 系统浏览器打开的授权页面
+    browser_url: "https://hk.geek2api.com/cli-bridge"
+    # 轮询取回令牌的接口
+    poll_url: "https://hk.geek2api.com/api/v1/auth/cli-bridge/poll"
+    # 用户资料接口（用于验证登录）
+    profile_url: "https://hk.geek2api.com/api/v1/user/profile"
+    # Token 刷新接口
+    refresh_url: "https://hk.geek2api.com/api/v1/auth/refresh"
+    # 轮询间隔（毫秒），默认 3000（3秒），范围 1000-10000
+    poll_interval_ms: 3000
+    # 最大等待时间（毫秒），默认 300000（5分钟），范围 60000-600000
+    max_wait_ms: 300000
+    # Token 过期前多少秒开始刷新，默认 300（5分钟）
+    refresh_before_expiry_seconds: 300
+    # 登录失败后的重试冷却时间（毫秒），默认 5000（5秒）
+    retry_cooldown_ms: 5000
+
 # incoming：外部 HTTP 请求触发机器人动作
 incoming:
   # 端点列表。每个端点：id 标识、enabled 是否启用、method 请求方法、
@@ -254,6 +284,76 @@ outgoing:
         message: "降智检测冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
       actions:
         - ref: "codex-degradation-report"
+
+    # Model Plaza 查询：群成员发送"模型 <关键词>"时匹配所有包含关键词的分组，并分别列出各分组模型
+    - id: "model-plaza-query-models"
+      # 默认关闭；启用前需设置 model_plaza.enabled: true
+      enabled: false
+      events: ["group_message"]
+      # 使用占位群号，生产环境替换为允许触发查询的群；留空表示不限制群
+      groups: [123456789]
+      message:
+        # 消息以"模型"开头时触发，例如："模型 OpenAI"、"模型 gpt"
+        starts_with: ["模型"]
+      single_flight:
+        enabled: true
+        key: "model-plaza-query"
+        notify: true
+        message: "模型查询正在执行，请稍候..."
+      cooldown:
+        enabled: true
+        personal_ms: 10000
+        administrator_ms: 5000
+        global_ms: 3000
+        notify: true
+        message: "查询冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        # query_model_plaza_models 会自动从 event.messageText 提取关键词
+        # 例如 "模型 gpt" -> 分别列出 gpt、gptpro、gpt-Azure 等命中分组及其模型
+        - type: "query_model_plaza_models"
+          # 可选：显式指定查询关键词（支持模板变量）
+          # query_pattern: "${event.messageText}"
+          # 可选：查询进行中提示
+          pending_message: "正在查询分组模型，请稍候..."
+          # 可选：查询失败提示
+          failure_message: "查询失败，请稍后重试"
+          # 可选：无结果提示
+          empty_message: "未找到包含该关键词的分组"
+
+    # Model Plaza 查询：群成员发送"分组 <关键词>"时匹配所有包含关键词的模型，并分别列出各模型分组
+    - id: "model-plaza-query-groups"
+      # 默认关闭；启用前需设置 model_plaza.enabled: true
+      enabled: false
+      events: ["group_message"]
+      # 使用占位群号，生产环境替换为允许触发查询的群；留空表示不限制群
+      groups: [123456789]
+      message:
+        # 消息以"分组"开头时触发，例如："分组 gpt-4"、"分组 claude"
+        starts_with: ["分组"]
+      single_flight:
+        enabled: true
+        key: "model-plaza-query"
+        notify: true
+        message: "分组查询正在执行，请稍候..."
+      cooldown:
+        enabled: true
+        personal_ms: 10000
+        administrator_ms: 5000
+        global_ms: 3000
+        notify: true
+        message: "查询冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        # query_model_plaza_groups 会自动从 event.messageText 提取关键词
+        # 例如 "分组 gpt" -> 分别列出所有名称包含 gpt 的模型及其所属分组
+        - type: "query_model_plaza_groups"
+          # 可选：显式指定查询关键词（支持模板变量）
+          # query_pattern: "${event.messageText}"
+          # 可选：查询进行中提示
+          pending_message: "正在查询模型分组，请稍候..."
+          # 可选：查询失败提示
+          failure_message: "查询失败，请稍后重试"
+          # 可选：无结果提示
+          empty_message: "未找到包含该关键词的模型"
 
     - id: "friend-message-forward"
       enabled: false
