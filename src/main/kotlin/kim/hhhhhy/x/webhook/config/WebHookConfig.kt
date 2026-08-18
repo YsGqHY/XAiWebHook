@@ -172,6 +172,35 @@ internal object WebHookConfig {
                 .mapIndexedNotNull { index, item -> parseRoute(index, item, actions) }
         )
 
+        val modelPlaza = root.map("model_plaza").let { plazaMap ->
+            val authMap = plazaMap.map("auth")
+            val authConfig = if (authMap.isEmpty()) {
+                null
+            } else {
+                ModelPlazaAuthConfig(
+                    startUrl = authMap.string("start_url", "https://hk.geek2api.com/api/v1/auth/cli-bridge/start"),
+                    browserUrl = authMap.string("browser_url", "https://hk.geek2api.com/cli-bridge"),
+                    pollUrl = authMap.string("poll_url", "https://hk.geek2api.com/api/v1/auth/cli-bridge/poll"),
+                    profileUrl = authMap.string("profile_url", "https://hk.geek2api.com/api/v1/user/profile"),
+                    refreshUrl = authMap.string("refresh_url", "https://hk.geek2api.com/api/v1/auth/refresh"),
+                    pollIntervalMillis = authMap.long("poll_interval_ms", 3_000L).coerceIn(1_000L, 10_000L),
+                    maxWaitMillis = authMap.long("max_wait_ms", 300_000L).coerceIn(60_000L, 600_000L),
+                    refreshBeforeExpirySeconds = authMap.long("refresh_before_expiry_seconds", 300L).coerceIn(0L, 86400L),
+                    retryCooldownMillis = authMap.long("retry_cooldown_ms", 5_000L).coerceIn(0L, 3_600_000L)
+                )
+            }
+            ModelPlazaConfig(
+                enabled = plazaMap.boolean("enabled", false),
+                baseUrl = plazaMap.string("base_url", "https://hk.geek2api.com/model-plaza"),
+                timeoutMillis = plazaMap.long("timeout_ms", 30_000L).coerceIn(5_000L, 120_000L),
+                auth = authConfig
+            )
+        }
+        WebHookDebug.log("""[XAiWebHook] [配置] Model Plaza 配置
+  enabled      : ${modelPlaza.enabled}
+  baseUrl      : ${modelPlaza.baseUrl}
+  timeoutMillis: ${modelPlaza.timeoutMillis}""")
+
         return PluginConfig(
             server = server,
             auth = auth,
@@ -181,7 +210,8 @@ internal object WebHookConfig {
             outgoing = outgoing,
             actions = actions,
             security = security,
-            logging = logging
+            logging = logging,
+            modelPlaza = modelPlaza
         )
     }
 
@@ -310,7 +340,8 @@ internal data class PluginConfig(
     val outgoing: OutgoingConfig,
     val actions: Map<String, ActionConfig>,
     val security: SecurityConfig,
-    val logging: LoggingConfig
+    val logging: LoggingConfig,
+    val modelPlaza: ModelPlazaConfig
 ) {
     companion object {
         fun safeDefault(): PluginConfig = PluginConfig(
@@ -322,7 +353,8 @@ internal data class PluginConfig(
             outgoing = OutgoingConfig(routes = emptyList()),
             actions = emptyMap(),
             security = SecurityConfig(allowCommandExecution = false, maxBodyBytes = 1_048_576L),
-            logging = LoggingConfig(request = true, response = true, errorStacktrace = true, debug = false)
+            logging = LoggingConfig(request = true, response = true, errorStacktrace = true, debug = false),
+            modelPlaza = ModelPlazaConfig.safeDefault()
         )
     }
 }
@@ -471,6 +503,34 @@ internal data class LoggingConfig(
     val response: Boolean,
     val errorStacktrace: Boolean,
     val debug: Boolean
+)
+
+internal data class ModelPlazaConfig(
+    val enabled: Boolean,
+    val baseUrl: String,
+    val timeoutMillis: Long,
+    val auth: ModelPlazaAuthConfig?
+) {
+    companion object {
+        fun safeDefault(): ModelPlazaConfig = ModelPlazaConfig(
+            enabled = false,
+            baseUrl = "https://hk.geek2api.com/model-plaza",
+            timeoutMillis = 30_000L,
+            auth = null
+        )
+    }
+}
+
+internal data class ModelPlazaAuthConfig(
+    val startUrl: String,
+    val browserUrl: String,
+    val pollUrl: String,
+    val profileUrl: String,
+    val refreshUrl: String,
+    val pollIntervalMillis: Long,
+    val maxWaitMillis: Long,
+    val refreshBeforeExpirySeconds: Long,
+    val retryCooldownMillis: Long
 )
 
 internal fun Any?.asMap(): Map<String, Any?> {

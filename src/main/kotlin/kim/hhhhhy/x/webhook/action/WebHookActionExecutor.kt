@@ -116,6 +116,8 @@ internal object WebHookActionExecutor {
             "send_friend_message" -> sendFriendMessage(action, context)
             "send_webpage_screenshot" -> sendWebpageScreenshot(action, context)
             "send_codex_radar_report" -> sendCodexRadarReport(action, context)
+            "query_model_plaza_models" -> ModelPlazaQueryAction.queryModels(action, context)
+            "query_model_plaza_groups" -> ModelPlazaQueryAction.queryGroups(action, context)
             "http_request" -> httpRequest(action, context)
             "execute_command" -> executeCommand(action, context)
             "reply" -> reply(action, context)
