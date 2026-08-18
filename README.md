@@ -210,6 +210,7 @@ outgoing:
 | `auth` | Incoming Bearer Token 鉴权 |
 | `templates` | 模板表达式开关与缺失变量策略 |
 | `browser` | 浏览器、超时、白名单和会话缓存 |
+| `model_plaza` | Model Plaza 查询功能开关与 URL |
 | `incoming.endpoints` | 外部请求入口 |
 | `outgoing.routes` | mirai 消息事件匹配规则 |
 | `actions` | 可复用命名动作 |
@@ -224,6 +225,8 @@ outgoing:
 | `send_friend_message` | 发送好友消息 |
 | `http_request` | 发起 HTTP 请求 |
 | `send_webpage_screenshot` | 使用 Playwright 截图并发送图片 |
+| `query_model_plaza_models` | 匹配所有包含关键词的分组，并分别列出各分组模型 |
+| `query_model_plaza_groups` | 匹配所有包含关键词的模型，并分别列出各模型分组 |
 | `reply` | 构造 Incoming HTTP 响应 |
 | `execute_command` | 执行 mirai-console 命令，默认禁用 |
 
@@ -283,6 +286,131 @@ cooldown:
 ```
 
 冷却和单飞状态只保存在内存中。管理员绕过权限为 `kim.hhhhhy.x.webhook:cooldown-bypass`。
+
+## Model Plaza 查询
+
+通过 outgoing 路由在指定群聊中触发模型和分组查询。群成员发送特定消息格式即可查询 Geek2API 模型广场数据：
+
+- **按分组关键词查询模型**：发送 `模型 <关键词>`；例如 `模型 gpt` 会命中 `gpt`、`gptpro`、`gpt-Azure` 等分组，并分别列出各分组拥有的模型
+- **按模型关键词查询分组**：发送 `分组 <关键词>`；例如 `分组 gpt` 会命中所有名称包含 `gpt` 的模型，并分别列出各模型所属分组
+
+支持不区分大小写的子串模糊匹配；同名分组、模型及其关联结果会自动合并去重。
+
+### 配置步骤
+
+1. 启用 Model Plaza 功能并配置 CLI Bridge 认证：
+
+```yaml
+model_plaza:
+  enabled: true
+  base_url: "https://hk.geek2api.com/model-plaza"
+  timeout_ms: 30000
+  # CLI Bridge 认证配置 — /model-plaza 需要登录后才能访问
+  # 使用 CLI Bridge 在系统浏览器中完成授权，无需在配置中保存密码
+  auth:
+    start_url: "https://hk.geek2api.com/api/v1/auth/cli-bridge/start"
+    browser_url: "https://hk.geek2api.com/cli-bridge"
+    poll_url: "https://hk.geek2api.com/api/v1/auth/cli-bridge/poll"
+    profile_url: "https://hk.geek2api.com/api/v1/user/profile"
+    refresh_url: "https://hk.geek2api.com/api/v1/auth/refresh"
+    poll_interval_ms: 3000
+    max_wait_ms: 300000
+    refresh_before_expiry_seconds: 300
+    retry_cooldown_ms: 5000
+```
+
+**重要说明**：
+- `model_plaza.auth` 必须配置，缺少该段将报错提示
+- 首次触发查询时会自动启动 CLI Bridge 登录流程：
+  1. 插件打开系统默认浏览器，导航到授权页面
+  2. 用户在浏览器中通过任意方式（账号密码 / Google / GitHub…）登录 Geek2API 并授权
+  3. 授权后令牌缓存至 `<mirai 根目录>/data/kim.hhhhhy.x.webhook/model-plaza-cache/`
+  4. 后续查询直接复用缓存令牌，令牌到期前自动静默刷新
+- 服务器无桌面环境时，浏览器无法自动打开。此时查看 mirai-console 日志，找到类似 `打开系统浏览器进行授权: https://hk.geek2api.com/cli-bridge?bridge_id=...` 的日志行，在本机浏览器手动访问该 URL 完成授权（5 分钟内有效）
+
+2. 配置 outgoing 路由（已包含在默认配置中）：
+
+```yaml
+outgoing:
+  routes:
+    - id: "model-plaza-query-models"
+      enabled: true  # 修改为 true 启用
+      events: ["group_message"]
+      groups: [123456789]  # 替换为实际群号，留空表示不限制
+      message:
+        starts_with: ["模型"]
+      actions:
+        - type: "query_model_plaza_models"
+          pending_message: "正在查询分组模型，请稍候..."
+          failure_message: "查询失败，请稍后重试"
+          empty_message: "未找到包含该关键词的分组"
+
+    - id: "model-plaza-query-groups"
+      enabled: true  # 修改为 true 启用
+      events: ["group_message"]
+      groups: [123456789]  # 替换为实际群号
+      message:
+        starts_with: ["分组"]
+      actions:
+        - type: "query_model_plaza_groups"
+          pending_message: "正在查询模型分组，请稍候..."
+          failure_message: "查询失败，请稍后重试"
+          empty_message: "未找到包含该关键词的模型"
+```
+
+3. 执行 `/xwebhook reload` 重载配置
+
+### 使用示例
+
+在配置的群聊中发送：
+
+```
+模型 gpt
+```
+
+机器人回复：
+
+```
+包含 'gpt' 的分组（共 3 个）:
+分组：gpt
+- gpt-4
+- gpt-5
+
+分组：gptpro
+- gpt-4
+- gpt-pro
+
+分组：gpt-Azure
+- gpt-4
+- gpt-azure-chat
+```
+
+发送：
+
+```
+分组 gpt
+```
+
+机器人回复：
+
+```
+包含 'gpt' 的模型（共 2 个）:
+模型：gpt-4
+- gpt
+- gptpro
+- gpt-Azure
+
+模型：gpt-5
+- gpt
+```
+
+### 技术说明
+
+- 使用登录 JWT 和原浏览器 Cookie 缓存直连 Geek2API `/api/v1/model-plaza` 接口，不依赖页面 DOM
+- 支持 `hk → hk2 → hk3 → hk4 → hk5` 入口 failover，并在 401 时刷新 Token 后重试一次
+- 支持自定义 `query_pattern` 参数覆盖默认提取逻辑
+- 模糊匹配全部命中项，按分组或模型聚合关联结果并去重
+- 支持配置冷却时间和单飞控制避免并发查询
 
 ## 命令与权限
 
