@@ -1,6 +1,7 @@
 package kim.hhhhhy.x.webhook.config
 
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import org.yaml.snakeyaml.Yaml
 import java.io.File
 
@@ -118,6 +119,7 @@ internal object WebHookConfig {
                 engine = browserMap.string("engine", "chromium").lowercase(),
                 channel = browserMap.stringOrNull("channel"),
                 executablePath = browserMap.stringOrNull("executable_path"),
+                proxyUrl = HttpProxySupport.normalize(browserMap.stringOrNull("proxy")),
                 headless = browserMap.boolean("headless", true),
                 viewportWidth = browserMap.int("viewport_width", 1440).coerceIn(320, 7680),
                 viewportHeight = browserMap.int("viewport_height", 1000).coerceIn(240, 4320),
@@ -138,6 +140,7 @@ internal object WebHookConfig {
   enabled       : ${browser.enabled}
   engine        : ${browser.engine}
   channel       : ${browser.channel ?: "(默认)"}
+  proxy         : ${HttpProxySupport.describe(browser.proxyUrl)}
   sessionCache  : ${if (browser.sessionCacheEnabled) browser.sessionCacheDirectory else "disabled"}
   allowedHosts  : ${browser.allowedHosts.size} 个""")
 
@@ -189,17 +192,103 @@ internal object WebHookConfig {
                     retryCooldownMillis = authMap.long("retry_cooldown_ms", 5_000L).coerceIn(0L, 3_600_000L)
                 )
             }
+            val queriesMap = plazaMap.map("queries")
+            val queries = ModelPlazaQueriesConfig(
+                models = parseModelPlazaQueryConfig(
+                    queriesMap.map("models"),
+                    ModelPlazaQueryConfig.modelsDefault()
+                ),
+                groups = parseModelPlazaQueryConfig(
+                    queriesMap.map("groups"),
+                    ModelPlazaQueryConfig.groupsDefault()
+                )
+            )
             ModelPlazaConfig(
                 enabled = plazaMap.boolean("enabled", false),
                 baseUrl = plazaMap.string("base_url", "https://hk.geek2api.com/model-plaza"),
                 timeoutMillis = plazaMap.long("timeout_ms", 30_000L).coerceIn(5_000L, 120_000L),
-                auth = authConfig
+                proxyUrl = HttpProxySupport.normalize(plazaMap.stringOrNull("proxy")),
+                auth = authConfig,
+                queries = queries
             )
         }
         WebHookDebug.log("""[XAiWebHook] [配置] Model Plaza 配置
   enabled      : ${modelPlaza.enabled}
   baseUrl      : ${modelPlaza.baseUrl}
+  proxy        : ${HttpProxySupport.describe(modelPlaza.proxyUrl)}
   timeoutMillis: ${modelPlaza.timeoutMillis}""")
+
+        val polymarket = root.map("polymarket").let { polyMap ->
+            val keywordExtraction = parseQueryKeywordExtraction(polyMap.map("keyword_extraction"))
+            val filters = parsePolymarketFilterConfig(polyMap.map("filters"))
+            val whitelistMap = polyMap.map("whitelist")
+            val whitelist = PolymarketWhitelistConfig(
+                keywords = whitelistMap.stringList("keywords")
+                    .filter { it.isNotBlank() }
+                    .distinctBy { it.lowercase() }
+                    .ifEmpty { PolymarketWhitelistConfig.DEFAULT_KEYWORDS },
+                caseSensitive = whitelistMap.boolean("case_sensitive", false),
+                rejectMessage = whitelistMap.string(
+                    "reject_message",
+                    "仅支持搜索白名单中的大模型相关市场；当前关键词：\${keyword}"
+                )
+            )
+
+            val responseFormatMap = polyMap.map("response_format")
+            val responseFormat = if (responseFormatMap.isEmpty()) {
+                null
+            } else {
+                PolymarketResponseFormatConfig(
+                    maxHistoryPoints = responseFormatMap.int("max_history_points", 5).coerceIn(1, 20),
+                    dateFormat = responseFormatMap.string("date_format", "yyyy年MM月dd日"),
+                    timezone = responseFormatMap.string("timezone", "Asia/Shanghai"),
+                    compactNumbers = responseFormatMap.boolean("compact_numbers", true),
+                    successTemplate = responseFormatMap.stringOrNull("success_template"),
+                    emptyTemplate = responseFormatMap.stringOrNull("empty_template"),
+                    errorTemplate = responseFormatMap.stringOrNull("error_template"),
+                    outputMode = responseFormatMap.string("output_mode", "image")
+                        .lowercase()
+                        .takeIf { it == "image" || it == "text" || it == "both" }
+                        ?: "image",
+                    imageFallbackToText = responseFormatMap.boolean("image_fallback_to_text", true),
+                    imageWidthPx = responseFormatMap.int("image_width_px", 1440).coerceIn(900, 2400)
+                )
+            }
+
+            PolymarketConfig(
+                enabled = polyMap.boolean("enabled", false),
+                gammaApiBaseUrl = polyMap.string("gamma_api_base_url", "https://gamma-api.polymarket.com"),
+                clobApiBaseUrl = polyMap.string("clob_api_base_url", "https://clob.polymarket.com"),
+                timeoutMillis = polyMap.long("timeout_ms", 30_000L).coerceIn(5_000L, 120_000L),
+                proxyUrl = HttpProxySupport.normalize(polyMap.stringOrNull("proxy")),
+                locale = polyMap.string("locale", "zh").takeIf { it.matches(Regex("[A-Za-z-]{2,16}")) } ?: "zh",
+                searchFields = polyMap.stringList("search_fields")
+                    .map { it.lowercase() }
+                    .filter { it == "question" || it == "description" }
+                    .distinct()
+                    .ifEmpty { listOf("question", "description") },
+                commandPrefix = polyMap.string("command_prefix", "poly"),
+                enabledGroups = polyMap.longList("enabled_groups"),
+                searchPageSize = polyMap.int("search_page_size", 100).coerceIn(1, 500),
+                maxSearchPages = polyMap.int("max_search_pages", 3).coerceIn(1, 20),
+                whitelist = whitelist,
+                keywordExtraction = keywordExtraction,
+                filters = filters,
+                responseFormat = responseFormat
+            )
+        }
+        WebHookDebug.log("""[XAiWebHook] [配置] Polymarket 配置
+  enabled      : ${polymarket.enabled}
+  gammaApiBase : ${polymarket.gammaApiBaseUrl}
+  clobApiBase  : ${polymarket.clobApiBaseUrl}
+  timeoutMillis: ${polymarket.timeoutMillis}
+  proxy        : ${HttpProxySupport.describe(polymarket.proxyUrl)}
+  locale       : ${polymarket.locale}
+  commandPrefix: ${polymarket.commandPrefix}
+  enabledGroups: ${polymarket.enabledGroups.size} 个
+  searchPages  : ${polymarket.maxSearchPages} × ${polymarket.searchPageSize}
+  outputMode   : ${polymarket.responseFormat?.outputMode ?: "image"}
+  whitelist    : ${polymarket.whitelist.keywords.size} 个模型名""")
 
         return PluginConfig(
             server = server,
@@ -211,7 +300,108 @@ internal object WebHookConfig {
             actions = actions,
             security = security,
             logging = logging,
-            modelPlaza = modelPlaza
+            modelPlaza = modelPlaza,
+            polymarket = polymarket
+        )
+    }
+
+    private fun parseQueryKeywordExtraction(
+        map: Map<String, Any?>
+    ): QueryKeywordExtractionConfig? {
+        if (map.isEmpty()) return null
+        return QueryKeywordExtractionConfig(
+            removePrefixes = map.stringList("remove_prefixes"),
+            pattern = map.stringOrNull("pattern"),
+            captureGroup = map.int("capture_group", 1).coerceIn(0, 20),
+            trim = map.boolean("trim", true),
+            toLowerCase = map.boolean("lowercase", false),
+            requirePrefixMatch = map.boolean("require_prefix_match", false)
+        )
+    }
+
+    private fun parsePolymarketFilterConfig(
+        map: Map<String, Any?>
+    ): QueryFilterConfig? {
+        if (map.isEmpty()) return null
+        val lengthMap = map.map("length")
+        val length = if (lengthMap.isEmpty()) null else QueryLengthConfig(
+            min = lengthMap.int("min", 0).takeIf { it > 0 },
+            max = lengthMap.int("max", 0).takeIf { it > 0 },
+            rejectMessage = lengthMap.string("reject_message", "关键词长度不符合要求")
+        )
+        val patternMap = map.map("pattern")
+        val pattern = if (patternMap.isEmpty()) null else QueryPatternConfig(
+            pattern = patternMap.string("regex", ""),
+            rejectMessage = patternMap.string("reject_message", "关键词格式不正确")
+        ).takeIf { it.pattern.isNotBlank() }
+        if (length == null && pattern == null) return null
+        return QueryFilterConfig(
+            blacklist = null,
+            whitelist = null,
+            length = length,
+            pattern = pattern
+        )
+    }
+
+    private fun parseQueryFilterConfig(
+        map: Map<String, Any?>
+    ): QueryFilterConfig? {
+        if (map.isEmpty()) return null
+        val blacklistMap = map.map("blacklist")
+        val blacklist = if (blacklistMap.isEmpty()) null else QueryBlacklistConfig(
+            enabled = blacklistMap.boolean("enabled", true),
+            keywords = blacklistMap.stringList("keywords"),
+            caseSensitive = blacklistMap.boolean("case_sensitive", false),
+            rejectMessage = blacklistMap.string("reject_message", "关键词已被禁止")
+        )
+        val whitelistMap = map.map("whitelist")
+        val whitelist = if (whitelistMap.isEmpty()) null else QueryWhitelistConfig(
+            enabled = whitelistMap.boolean("enabled", true),
+            keywords = whitelistMap.stringList("keywords"),
+            caseSensitive = whitelistMap.boolean("case_sensitive", false),
+            rejectMessage = whitelistMap.string("reject_message", "关键词不在允许列表中")
+        )
+        val lengthMap = map.map("length")
+        val length = if (lengthMap.isEmpty()) null else QueryLengthConfig(
+            min = lengthMap.int("min", 0).takeIf { it > 0 },
+            max = lengthMap.int("max", 0).takeIf { it > 0 },
+            rejectMessage = lengthMap.string("reject_message", "关键词长度不符合要求")
+        )
+        val patternMap = map.map("pattern")
+        val pattern = if (patternMap.isEmpty()) null else QueryPatternConfig(
+            pattern = patternMap.string("regex", ""),
+            rejectMessage = patternMap.string("reject_message", "关键词格式不正确")
+        ).takeIf { it.pattern.isNotBlank() }
+        return QueryFilterConfig(
+            blacklist = blacklist,
+            whitelist = whitelist,
+            length = length,
+            pattern = pattern
+        )
+    }
+
+    private fun parseModelPlazaQueryConfig(
+        map: Map<String, Any?>,
+        defaults: ModelPlazaQueryConfig
+    ): ModelPlazaQueryConfig {
+        val responseMap = map.map("response_format")
+        val response = ModelPlazaResponseFormatConfig(
+            successTemplate = responseMap.stringOrNull("success_template")
+                ?: defaults.responseFormat.successTemplate,
+            pendingMessage = responseMap.string("pending_message", defaults.responseFormat.pendingMessage),
+            failureMessage = responseMap.string("failure_message", defaults.responseFormat.failureMessage),
+            emptyMessage = responseMap.string("empty_message", defaults.responseFormat.emptyMessage)
+        )
+        val sort = map.string("sort", defaults.sort).lowercase()
+            .takeIf { it == "source" || it == "alphabetical" } ?: defaults.sort
+        return ModelPlazaQueryConfig(
+            keywordExtraction = parseQueryKeywordExtraction(map.map("keyword_extraction"))
+                ?: defaults.keywordExtraction,
+            filters = parseQueryFilterConfig(map.map("filters")) ?: defaults.filters,
+            sort = sort,
+            limit = map.int("limit", defaults.limit).coerceIn(0, 100),
+            maxRelatedItems = map.int("max_related_items", defaults.maxRelatedItems).coerceIn(0, 100),
+            responseFormat = response
         )
     }
 
@@ -341,7 +531,8 @@ internal data class PluginConfig(
     val actions: Map<String, ActionConfig>,
     val security: SecurityConfig,
     val logging: LoggingConfig,
-    val modelPlaza: ModelPlazaConfig
+    val modelPlaza: ModelPlazaConfig,
+    val polymarket: PolymarketConfig
 ) {
     companion object {
         fun safeDefault(): PluginConfig = PluginConfig(
@@ -354,7 +545,8 @@ internal data class PluginConfig(
             actions = emptyMap(),
             security = SecurityConfig(allowCommandExecution = false, maxBodyBytes = 1_048_576L),
             logging = LoggingConfig(request = true, response = true, errorStacktrace = true, debug = false),
-            modelPlaza = ModelPlazaConfig.safeDefault()
+            modelPlaza = ModelPlazaConfig.safeDefault(),
+            polymarket = PolymarketConfig.safeDefault()
         )
     }
 }
@@ -390,7 +582,8 @@ internal data class BrowserConfig(
     val sessionCacheEnabled: Boolean,
     val sessionCacheDirectory: String,
     val allowedHosts: List<String>,
-    val maxScreenshotBytes: Long
+    val maxScreenshotBytes: Long,
+    val proxyUrl: String = ""
 ) {
     companion object {
         fun safeDefault(): BrowserConfig = BrowserConfig(
@@ -406,7 +599,8 @@ internal data class BrowserConfig(
             sessionCacheEnabled = false,
             sessionCacheDirectory = "browser-session-cache",
             allowedHosts = emptyList(),
-            maxScreenshotBytes = 10_485_760L
+            maxScreenshotBytes = 10_485_760L,
+            proxyUrl = ""
         )
     }
 }
@@ -509,17 +703,80 @@ internal data class ModelPlazaConfig(
     val enabled: Boolean,
     val baseUrl: String,
     val timeoutMillis: Long,
-    val auth: ModelPlazaAuthConfig?
+    val auth: ModelPlazaAuthConfig?,
+    val queries: ModelPlazaQueriesConfig = ModelPlazaQueriesConfig(
+        models = ModelPlazaQueryConfig.modelsDefault(),
+        groups = ModelPlazaQueryConfig.groupsDefault()
+    ),
+    val proxyUrl: String = ""
 ) {
     companion object {
         fun safeDefault(): ModelPlazaConfig = ModelPlazaConfig(
             enabled = false,
             baseUrl = "https://hk.geek2api.com/model-plaza",
             timeoutMillis = 30_000L,
-            auth = null
+            auth = null,
+            queries = ModelPlazaQueriesConfig(
+                models = ModelPlazaQueryConfig.modelsDefault(),
+                groups = ModelPlazaQueryConfig.groupsDefault()
+            ),
+            proxyUrl = ""
         )
     }
 }
+
+internal data class ModelPlazaQueriesConfig(
+    val models: ModelPlazaQueryConfig,
+    val groups: ModelPlazaQueryConfig
+)
+
+internal data class ModelPlazaQueryConfig(
+    val keywordExtraction: QueryKeywordExtractionConfig,
+    val filters: QueryFilterConfig?,
+    val sort: String,
+    val limit: Int,
+    val maxRelatedItems: Int,
+    val responseFormat: ModelPlazaResponseFormatConfig
+) {
+    companion object {
+        fun modelsDefault(): ModelPlazaQueryConfig = ModelPlazaQueryConfig(
+            keywordExtraction = QueryKeywordExtractionConfig(
+                removePrefixes = listOf("模型", "分组", "model", "group"),
+                pattern = null,
+                captureGroup = 1,
+                trim = true,
+                toLowerCase = false,
+                requirePrefixMatch = true
+            ),
+            filters = null,
+            sort = "source",
+            limit = 0,
+            maxRelatedItems = 0,
+            responseFormat = ModelPlazaResponseFormatConfig(
+                successTemplate = null,
+                pendingMessage = "正在查询分组模型，请稍候...",
+                failureMessage = "查询失败，请稍后重试",
+                emptyMessage = "未找到包含该关键词的分组"
+            )
+        )
+
+        fun groupsDefault(): ModelPlazaQueryConfig = modelsDefault().copy(
+            responseFormat = ModelPlazaResponseFormatConfig(
+                successTemplate = null,
+                pendingMessage = "正在查询模型分组，请稍候...",
+                failureMessage = "查询失败，请稍后重试",
+                emptyMessage = "未找到包含该关键词的模型"
+            )
+        )
+    }
+}
+
+internal data class ModelPlazaResponseFormatConfig(
+    val successTemplate: String?,
+    val pendingMessage: String,
+    val failureMessage: String,
+    val emptyMessage: String
+)
 
 internal data class ModelPlazaAuthConfig(
     val startUrl: String,
@@ -531,6 +788,158 @@ internal data class ModelPlazaAuthConfig(
     val maxWaitMillis: Long,
     val refreshBeforeExpirySeconds: Long,
     val retryCooldownMillis: Long
+)
+
+internal data class PolymarketConfig(
+    val enabled: Boolean,
+    val gammaApiBaseUrl: String,
+    val clobApiBaseUrl: String,
+    val timeoutMillis: Long,
+    val locale: String = "zh",
+    val searchFields: List<String> = listOf("question", "description"),
+    val commandPrefix: String,
+    val enabledGroups: List<Long>,
+    val searchPageSize: Int = 100,
+    val maxSearchPages: Int = 3,
+    val whitelist: PolymarketWhitelistConfig,
+    val keywordExtraction: QueryKeywordExtractionConfig?,
+    val filters: QueryFilterConfig?,
+    val responseFormat: PolymarketResponseFormatConfig?,
+    val proxyUrl: String = ""
+) {
+    companion object {
+        fun safeDefault(): PolymarketConfig = PolymarketConfig(
+            enabled = false,
+            gammaApiBaseUrl = "https://gamma-api.polymarket.com",
+            clobApiBaseUrl = "https://clob.polymarket.com",
+            timeoutMillis = 30_000L,
+            locale = "zh",
+            searchFields = listOf("question", "description"),
+            commandPrefix = "poly",
+            enabledGroups = emptyList(),
+            searchPageSize = 100,
+            maxSearchPages = 3,
+            whitelist = PolymarketWhitelistConfig.default(),
+            keywordExtraction = null,
+            filters = null,
+            responseFormat = null,
+            proxyUrl = ""
+        )
+    }
+}
+
+internal data class PolymarketWhitelistConfig(
+    val keywords: List<String>,
+    val caseSensitive: Boolean,
+    val rejectMessage: String
+) {
+    companion object {
+        val DEFAULT_KEYWORDS: List<String> = listOf(
+            "GPT",
+            "ChatGPT",
+            "o1",
+            "o3",
+            "o4-mini",
+            "Claude",
+            "Gemini",
+            "Gemma",
+            "Grok",
+            "DeepSeek",
+            "Qwen",
+            "QwQ",
+            "通义千问",
+            "Llama",
+            "Mistral",
+            "Mixtral",
+            "Kimi",
+            "Moonshot",
+            "豆包",
+            "Doubao",
+            "GLM",
+            "ChatGLM",
+            "智谱",
+            "MiniMax",
+            "海螺",
+            "Hailuo",
+            "ERNIE",
+            "文心一言",
+            "Baichuan",
+            "百川",
+            "Yi-Large",
+            "Yi-Lightning",
+            "零一万物",
+            "Hunyuan",
+            "混元",
+            "阶跃星辰",
+            "Step-1",
+            "Step-2",
+            "Step-3",
+            "Phi",
+            "Command R",
+            "Cohere",
+            "Nova"
+        )
+
+        fun default(): PolymarketWhitelistConfig = PolymarketWhitelistConfig(
+            keywords = DEFAULT_KEYWORDS,
+            caseSensitive = false,
+            rejectMessage = "仅支持搜索白名单中的大模型相关市场；当前关键词：\${keyword}"
+        )
+    }
+}
+
+internal data class QueryKeywordExtractionConfig(
+    val removePrefixes: List<String>,
+    val pattern: String?,
+    val captureGroup: Int,
+    val trim: Boolean,
+    val toLowerCase: Boolean,
+    val requirePrefixMatch: Boolean
+)
+
+internal data class QueryFilterConfig(
+    val blacklist: QueryBlacklistConfig?,
+    val whitelist: QueryWhitelistConfig?,
+    val length: QueryLengthConfig?,
+    val pattern: QueryPatternConfig?
+)
+
+internal data class QueryBlacklistConfig(
+    val enabled: Boolean,
+    val keywords: List<String>,
+    val caseSensitive: Boolean,
+    val rejectMessage: String
+)
+
+internal data class QueryWhitelistConfig(
+    val enabled: Boolean,
+    val keywords: List<String>,
+    val caseSensitive: Boolean,
+    val rejectMessage: String
+)
+
+internal data class QueryLengthConfig(
+    val min: Int?,
+    val max: Int?,
+    val rejectMessage: String
+)
+
+internal data class QueryPatternConfig(
+    val pattern: String,
+    val rejectMessage: String
+)
+
+internal data class PolymarketResponseFormatConfig(
+    val maxHistoryPoints: Int,
+    val dateFormat: String,
+    val timezone: String,
+    val compactNumbers: Boolean,
+    val successTemplate: String?,
+    val emptyTemplate: String?,
+    val errorTemplate: String?,
+    val outputMode: String = "image",
+    val imageFallbackToText: Boolean = true,
+    val imageWidthPx: Int = 1440
 )
 
 internal fun Any?.asMap(): Map<String, Any?> {

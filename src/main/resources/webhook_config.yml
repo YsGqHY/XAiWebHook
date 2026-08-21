@@ -43,6 +43,9 @@ browser:
   channel: "msedge"
   # 自定义浏览器可执行文件路径，默认留空；配置后优先于 channel
   executable_path: ""
+  # 浏览器功能专用 HTTP(S) 代理，覆盖 Playwright 页面、认证 APIRequest 与 CLI Bridge 请求；留空表示直连
+  # 支持 http://127.0.0.1:7890、https://127.0.0.1:7890，也可写为 http://user:password@127.0.0.1:7890
+  proxy: ""
   # 是否无界面运行，默认 true；调试登录流程时可临时改为 false
   headless: true
   # 浏览器视口宽度，默认 1440，范围 320-7680
@@ -91,10 +94,101 @@ logging:
 model_plaza:
   # 是否启用 Model Plaza 查询功能，默认 false
   enabled: false
-  # Geek2Api 入口 URL；程序会直连同入口的 /api/v1/model-plaza，并按 hk → hk2 → hk3 → hk4 → hk5 故障转移
+  # Geek2Api 入口 URL；程序会访问同入口的 /api/v1/model-plaza，并按 hk → hk2 → hk3 → hk4 → hk5 故障转移
   base_url: "https://hk.geek2api.com/model-plaza"
   # API 查询超时时间（毫秒），默认 30000，范围 5000-120000
   timeout_ms: 30000
+  # Model Plaza 功能专用 HTTP(S) 代理，覆盖业务 API、CLI Bridge、用户信息与 Token 刷新；留空表示直连
+  # 支持 http://127.0.0.1:7890、https://127.0.0.1:7890，以及 URL 中的可选用户名密码
+  proxy: ""
+  # 查询行为配置；models 负责“模型”查询，groups 负责“分组”查询。
+  # action 内的 query_pattern、pending_message、failure_message、empty_message、success_template
+  # 优先级高于这里的对应配置，便于同一数据源配置多条不同路由。
+  queries:
+    models:
+      keyword_extraction:
+        # 自动提取时按顺序移除一个前缀；默认兼容“模型/分组/model/group”
+        remove_prefixes: ["模型", "分组", "model", "group"]
+        # 可选正则；填写后取 capture_group 捕获组，留空表示仅移除前缀
+        pattern: ""
+        # 正则捕获组编号，默认 1，范围 0-20
+        capture_group: 1
+        # 是否去除关键词首尾空白，默认 true
+        trim: true
+        # 是否转为小写，默认 false；接口匹配本身不区分大小写
+        lowercase: false
+        # 是否要求命中上述前缀，默认 true；避免普通聊天文本触发查询
+        require_prefix_match: true
+      # 可选过滤器；不配置时不限制查询词
+      # filters:
+      #   blacklist:
+      #     enabled: true
+      #     keywords: ["禁止词"]
+      #     case_sensitive: false
+      #     reject_message: "关键词“${keyword}”不允许查询"
+      #   whitelist:
+      #     enabled: true
+      #     keywords: ["允许词"]
+      #     case_sensitive: false
+      #     reject_message: "关键词“${keyword}”不在允许列表中"
+      #   length:
+      #     min: 1
+      #     max: 100
+      #     reject_message: "关键词长度必须在 ${min}-${max} 之间"
+      #   pattern:
+      #     regex: "^[\\p{L}\\p{N} ._-]+$"
+      #     reject_message: "关键词格式不正确"
+      # 结果排序：source 保持接口顺序，alphabetical 按名称排序；默认 source
+      sort: "source"
+      # 顶层结果最多显示多少项，0 表示不限制，范围 0-100
+      limit: 0
+      # 每项关联模型最多显示多少个，0 表示不限制，范围 0-100
+      max_related_items: 0
+      response_format:
+        # 查询中提示语；支持 ${query} 和事件模板变量
+        pending_message: "正在查询分组模型，请稍候..."
+        # 查询失败提示语
+        failure_message: "查询失败，请稍后重试"
+        # 无结果提示语
+        empty_message: "未找到包含该关键词的分组"
+        # 成功模板支持 foreach、if/else、format_number 等安全模板语法
+        success_template: |
+          包含“${query}”的分组（共 ${count} 个）：
+          ${foreach relation in relations}
+          分组：${relation.groupName}
+          ${if relation.models}
+          ${foreach model in relation.models}- ${model.name}
+          ${endforeach}
+          ${else}- （无可用模型）
+          ${endif}
+          ${endforeach}
+    groups:
+      keyword_extraction:
+        # 自动提取时按顺序移除一个前缀；默认兼容“模型/分组/model/group”
+        remove_prefixes: ["模型", "分组", "model", "group"]
+        pattern: ""
+        capture_group: 1
+        trim: true
+        lowercase: false
+        require_prefix_match: true
+      # 与 models 相同：可配置 filters、sort、limit、max_related_items
+      sort: "source"
+      limit: 0
+      max_related_items: 0
+      response_format:
+        pending_message: "正在查询模型分组，请稍候..."
+        failure_message: "查询失败，请稍后重试"
+        empty_message: "未找到包含该关键词的模型"
+        success_template: |
+          包含“${query}”的模型（共 ${count} 个）：
+          ${foreach relation in relations}
+          模型：${relation.modelName}
+          ${if relation.groups}
+          ${foreach group in relation.groups}- ${group.name}
+          ${endforeach}
+          ${else}- （无可用分组）
+          ${endif}
+          ${endforeach}
   # CLI Bridge 认证配置；接口请求会携带登录 JWT，并复用原 playwright-storage-state.json 中的 Cookie，响应更新会原子回写
   # 使用 CLI Bridge 在系统浏览器中登录，无需在配置中存储密码
   auth:
@@ -116,6 +210,148 @@ model_plaza:
     refresh_before_expiry_seconds: 300
     # 登录失败后的重试冷却时间（毫秒），默认 5000（5秒）
     retry_cooldown_ms: 5000
+
+# Polymarket 搜索设置（预测市场查询功能）
+polymarket:
+  # 是否启用 Polymarket 搜索功能，默认 false
+  enabled: false
+  # Gamma API 基础 URL，用于搜索市场和获取市场详情
+  gamma_api_base_url: "https://gamma-api.polymarket.com"
+  # CLOB API 基础 URL，用于获取价格历史数据
+  clob_api_base_url: "https://clob.polymarket.com"
+  # API 查询超时时间（毫秒），默认 30000，范围 5000-120000
+  timeout_ms: 30000
+  # Polymarket 功能专用 HTTP(S) 代理，同时覆盖 Gamma 与 CLOB 请求；留空表示直连
+  # 支持 http://127.0.0.1:7890、https://127.0.0.1:7890，以及 URL 中的可选用户名密码
+  proxy: ""
+  # Gamma 返回语言，默认 zh；可填 zh、en 等 2-16 位语言标识
+  locale: "zh"
+  # 关键词匹配字段，默认同时匹配 question 与 description；仅支持这两项
+  search_fields: ["question", "description"]
+  # 公共事件搜索无相关命中或暂时失败时，每页回退候选市场数量；默认 100，范围 1-500
+  search_page_size: 100
+  # 市场分页回退最多抓取页数；默认 3，范围 1-20；页数越大回退请求越多
+  max_search_pages: 3
+  # 命令前缀，默认 "poly"；群消息以此开头时触发搜索
+  command_prefix: "poly"
+  # 启用的群列表；为空时所有群都可用（需配合 outgoing route 的 groups 过滤）
+  enabled_groups: []
+  # 强制白名单：只有关键词或官方事件页 URL 中包含下列大模型名称时才允许搜索
+  # keywords 为空或缺失时自动回退到同一份内置默认名单，不会变成无限制搜索
+  whitelist:
+    # 大模型名称、家族名与常用别名；匹配默认忽略大小写，可按需增删
+    keywords:
+      - "GPT"
+      - "ChatGPT"
+      - "o1"
+      - "o3"
+      - "o4-mini"
+      - "Claude"
+      - "Gemini"
+      - "Gemma"
+      - "Grok"
+      - "DeepSeek"
+      - "Qwen"
+      - "QwQ"
+      - "通义千问"
+      - "Llama"
+      - "Mistral"
+      - "Mixtral"
+      - "Kimi"
+      - "Moonshot"
+      - "豆包"
+      - "Doubao"
+      - "GLM"
+      - "ChatGLM"
+      - "智谱"
+      - "MiniMax"
+      - "海螺"
+      - "Hailuo"
+      - "ERNIE"
+      - "文心一言"
+      - "Baichuan"
+      - "百川"
+      - "Yi-Large"
+      - "Yi-Lightning"
+      - "零一万物"
+      - "Hunyuan"
+      - "混元"
+      - "阶跃星辰"
+      - "Step-1"
+      - "Step-2"
+      - "Step-3"
+      - "Phi"
+      - "Command R"
+      - "Cohere"
+      - "Nova"
+    # 是否区分大小写，默认 false
+    case_sensitive: false
+    # 未命中白名单时的提示，支持 ${keyword} 变量
+    reject_message: "仅支持搜索白名单中的大模型相关市场；当前关键词：${keyword}"
+
+  # 可选：关键词提取配置（不配置则使用默认行为：移除 command_prefix 并 trim）
+  # keyword_extraction:
+  #   # 要移除的前缀列表（按顺序尝试，命中一个即停止）
+  #   remove_prefixes: ["poly", "polymarket"]
+  #   # 可选正则；填写后取 capture_group 捕获组
+  #   pattern: "^(?:poly|polymarket)\\s+(.+)$"
+  #   # 正则捕获组编号，默认 1，范围 0-20
+  #   capture_group: 1
+  #   # 是否 trim 空白，默认 true
+  #   trim: true
+  #   # 是否转小写，默认 false
+  #   lowercase: false
+  #   # 是否要求命中前缀，默认 false；命令场景建议 true
+  #   require_prefix_match: true
+
+  # 可选：白名单通过后的补充校验；Polymarket 不再支持任何黑名单配置
+  # filters:
+  #   # 长度验证
+  #   length:
+  #     # 最小长度，不配置则不限制
+  #     min: 2
+  #     # 最大长度，不配置则不限制
+  #     max: 200
+  #     # 拒绝消息模板，支持 ${keyword}、${min}、${max} 变量
+  #     reject_message: "关键词长度必须在 ${min}-${max} 之间"
+  #   # 正则验证（可选；事件页 URL 场景需允许 URL 中使用的符号）
+  #   pattern:
+  #     regex: "^[\\p{L}\\p{N} :/?._-]+$"
+  #     reject_message: "关键词格式不正确"
+
+  # 可选：响应格式化配置；整个区块不配置时，聚合事件成功结果仍默认发送图片
+  # response_format:
+  #   # 成功输出模式，默认 image；可选 image（仅图片）、text（旧文本）、both（同一消息内文本+图片）
+  #   output_mode: "image"
+  #   # 图片渲染、上传或发送失败时是否回退原成功文本，默认 true
+  #   image_fallback_to_text: true
+  #   # 图片 CSS 画布宽度，默认 1440，范围 900-2400；最终 PNG 以 2 倍倍率输出
+  #   image_width_px: 1440
+  #   # action 内同名参数 output_mode、image_fallback_to_text、image_width_px 可覆盖这里
+  #   # 历史数据最多显示几个点，默认 5，范围 1-20
+  #   max_history_points: 5
+  #   # 日期格式，默认 "yyyy年MM月dd日"
+  #   date_format: "yyyy年MM月dd日"
+  #   # 时区，默认 "Asia/Shanghai"
+  #   timezone: "Asia/Shanghai"
+  #   # 数字是否使用紧凑格式（1.5K、2.3M），默认 true
+  #   compact_numbers: true
+  #   # 可选：自定义成功响应模板（不配置则使用默认格式化逻辑）。
+  #   # 普通市场支持 ${market.question}、${market.category}、${market.volume}、${history}；
+  #   # 事件页 URL 还支持 ${event.title}、${eventPageUrl}、${markets}。
+  #   # 以及 foreach、if/else、format_number、format_price、format_date。
+  #   # success_template: |
+  #   #   ${market.question}
+  #   #   ${if market.category}分类：${market.category}
+  #   #   ${endif}总交易量：$${format_number(market.volume)}
+  #   #   ${foreach point in history | limit:5}
+  #   #   ${point.date}：是 ${format_price(point.yesPrice)} / 否 ${format_price(point.noPrice)}，${point.probability}%
+  #   #   ${if point.volume}交易量：$${format_number(point.volume)}
+  #   #   ${endif}${endforeach}
+  #   # 可选：自定义无结果消息模板，支持 ${keyword} 变量
+  #   # empty_template: "未找到 \"${keyword}\" 的市场"
+  #   # 可选：自定义错误消息模板，支持 ${keyword}、${error} 变量
+  #   # error_template: "搜索出错：${error}"
 
 # incoming：外部 HTTP 请求触发机器人动作
 incoming:
@@ -209,6 +445,9 @@ outgoing:
         - type: "http_request"
           method: "POST"
           url: "https://example.invalid/webhook/group-message"
+          # 当前 http_request 动作专用 HTTP(S) 代理；留空表示直连，不影响其他动作或功能
+          # 支持可选用户名密码，例如 http://user:password@127.0.0.1:7890
+          proxy: ""
           headers:
             Authorization: "Bearer change-me-token"
           body:
@@ -311,6 +550,8 @@ outgoing:
         # query_model_plaza_models 会自动从 event.messageText 提取关键词
         # 例如 "模型 gpt" -> 分别列出 gpt、gptpro、gpt-Azure 等命中分组及其模型
         - type: "query_model_plaza_models"
+          # 可选：覆盖 model_plaza.proxy；省略时继承功能级代理，显式留空则本动作直连
+          # proxy: "http://127.0.0.1:7890"
           # 可选：显式指定查询关键词（支持模板变量）
           # query_pattern: "${event.messageText}"
           # 可选：查询进行中提示
@@ -346,6 +587,8 @@ outgoing:
         # query_model_plaza_groups 会自动从 event.messageText 提取关键词
         # 例如 "分组 gpt" -> 分别列出所有名称包含 gpt 的模型及其所属分组
         - type: "query_model_plaza_groups"
+          # 可选：覆盖 model_plaza.proxy；省略时继承功能级代理，显式留空则本动作直连
+          # proxy: "http://127.0.0.1:7890"
           # 可选：显式指定查询关键词（支持模板变量）
           # query_pattern: "${event.messageText}"
           # 可选：查询进行中提示
@@ -354,6 +597,48 @@ outgoing:
           failure_message: "查询失败，请稍后重试"
           # 可选：无结果提示
           empty_message: "未找到包含该关键词的模型"
+
+    # Polymarket 搜索：群成员发送"poly <关键词>"时搜索并返回市场信息；也支持
+    # "poly https://polymarket.com/zh/event/<slug>"，此时按事件页返回全部开放子市场摘要。
+    - id: "polymarket-search-command"
+      # 默认关闭；启用前需设置 polymarket.enabled: true
+      enabled: false
+      events: ["group_message"]
+      # 使用占位群号，生产环境替换为允许触发搜索的群；留空表示不限制群
+      groups: [123456789]
+      message:
+        # 消息以"poly"开头时触发，例如："poly GPT-6"、"poly bitcoin"
+        starts_with: ["poly", "polymarket"]
+      single_flight:
+        enabled: true
+        key: "polymarket-search"
+        notify: true
+        message: "Polymarket 搜索正在执行，请稍候..."
+      cooldown:
+        enabled: true
+        personal_ms: 15000
+        administrator_ms: 5000
+        global_ms: 5000
+        notify: true
+        message: "搜索冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        # polymarket_search 会自动从 event.messageText 提取关键词
+        # 例如 "poly GPT-6" -> 搜索包含 GPT-6 的市场
+        - type: "polymarket_search"
+          # 可选：覆盖 polymarket.proxy；省略时继承功能级代理，显式留空则本动作直连
+          # proxy: "http://127.0.0.1:7890"
+          # 可选：显式指定搜索关键词（支持模板变量）
+          # keyword: "${event.messageText}"
+          # 可选：搜索进行中提示
+          pending_message: "正在搜索 Polymarket 市场，请稍候..."
+          # 可选：搜索失败提示
+          failure_message: "搜索失败，请稍后重试"
+          # 聚合事件成功结果发送模式：image 仅图片、text 旧文本、both 文本和图片；默认 image
+          output_mode: "image"
+          # 图片渲染、上传或发送失败时回退原成功文本，默认 true
+          image_fallback_to_text: true
+          # 图片 CSS 画布宽度，范围 900-2400；最终 PNG 以 2 倍倍率输出
+          image_width_px: 1440
 
     - id: "friend-message-forward"
       enabled: false
@@ -387,7 +672,8 @@ actions:
     # 说明：https://codexradar.com/api/intelligence-efficiency?refresh=1 是原始逐题评测矩阵
     # （约 1.9MB，含 tasks/cells/combos 与每次跑分的贡献者明细）。
     # 聚合结论已由上面两个接口提供，故本动作默认不拉取该接口，避免每次触发传输 1.9MB。
-    # HTTP 代理地址，例如 http://127.0.0.1:7890；留空表示直连。
+    # 当前 Codex 动作专用 HTTP(S) 代理；留空表示直连，不影响其他动作或功能。
+    # 支持 http://127.0.0.1:7890、https://127.0.0.1:7890，以及 URL 中的可选用户名密码。
     # 注意：codexradar.com 在部分网络环境下仅 IPv6 可达，而 JVM 默认优先 IPv4，
     # 表现为 connect timeout。若日志报连接超时，可在此填入可用代理，
     # 或给 mirai 启动参数加上 -Djava.net.preferIPv6Addresses=true。
