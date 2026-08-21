@@ -2,6 +2,7 @@ package kim.hhhhhy.x.webhook.scraper
 
 import kim.hhhhhy.x.webhook.config.ModelPlazaAuthConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -47,7 +48,8 @@ internal object ModelPlazaAuthManager {
     @Synchronized
     public fun getValidToken(
         authConfig: ModelPlazaAuthConfig,
-        cacheDir: File?
+        cacheDir: File?,
+        proxyUrl: String = ""
     ): String {
         initializeSessionCache(cacheDir)
         if (cachedSession == null) {
@@ -65,16 +67,16 @@ internal object ModelPlazaAuthManager {
 
             WebHookDebug.log("[ModelPlaza] 访问令牌已过期或即将过期，尝试刷新...")
             return try {
-                refreshAndCache(authConfig, session.refreshToken)
+                refreshAndCache(authConfig, session.refreshToken, proxyUrl)
             } catch (error: Exception) {
                 WebHookDebug.log("[ModelPlaza] Token 刷新失败: ${error.message}，将重新登录")
                 clearSessionCache()
-                performLogin(authConfig)
+                performLogin(authConfig, proxyUrl)
             }
         }
 
         WebHookDebug.log("[ModelPlaza] 无有效 Session，启动 CLI Bridge 登录...")
-        return performLogin(authConfig)
+        return performLogin(authConfig, proxyUrl)
     }
 
     /**
@@ -83,7 +85,8 @@ internal object ModelPlazaAuthManager {
     @Synchronized
     public fun refreshAfterUnauthorized(
         authConfig: ModelPlazaAuthConfig,
-        cacheDir: File?
+        cacheDir: File?,
+        proxyUrl: String = ""
     ): String {
         initializeSessionCache(cacheDir)
         if (cachedSession == null) {
@@ -94,16 +97,16 @@ internal object ModelPlazaAuthManager {
         if (session != null && session.refreshToken.isNotBlank()) {
             return try {
                 WebHookDebug.log("[ModelPlaza] 登录态被服务端拒绝，强制刷新 Token...")
-                refreshAndCache(authConfig, session.refreshToken)
+                refreshAndCache(authConfig, session.refreshToken, proxyUrl)
             } catch (error: Exception) {
                 WebHookDebug.log("[ModelPlaza] 强制刷新失败: ${error.message}，将重新登录")
                 clearSessionCache()
-                performLogin(authConfig)
+                performLogin(authConfig, proxyUrl)
             }
         }
 
         clearSessionCache()
-        return performLogin(authConfig)
+        return performLogin(authConfig, proxyUrl)
     }
 
     private fun initializeSessionCache(cacheDir: File?) {
@@ -116,8 +119,12 @@ internal object ModelPlazaAuthManager {
         }
     }
 
-    private fun refreshAndCache(authConfig: ModelPlazaAuthConfig, refreshToken: String): String {
-        val refreshed = refreshToken(authConfig, refreshToken)
+    private fun refreshAndCache(
+        authConfig: ModelPlazaAuthConfig,
+        refreshToken: String,
+        proxyUrl: String
+    ): String {
+        val refreshed = refreshToken(authConfig, refreshToken, proxyUrl)
         cachedSession = refreshed
         saveSessionToCache(refreshed)
         WebHookDebug.log("[ModelPlaza] Token 刷新成功，用户: ${refreshed.user}")
@@ -132,8 +139,8 @@ internal object ModelPlazaAuthManager {
         }
     }
 
-    private fun performLogin(authConfig: ModelPlazaAuthConfig): String {
-        val client = newHttpClient(30_000L)
+    private fun performLogin(authConfig: ModelPlazaAuthConfig, proxyUrl: String): String {
+        val client = newHttpClient(30_000L, proxyUrl)
 
         // 1. 启动 CLI Bridge 会话
         WebHookDebug.log("[ModelPlaza] 请求 CLI Bridge 会话...")
@@ -224,8 +231,12 @@ internal object ModelPlazaAuthManager {
         throw IllegalStateException("CLI Bridge 登录超时，用户未在浏览器中完成授权")
     }
 
-    private fun refreshToken(authConfig: ModelPlazaAuthConfig, refreshToken: String): CachedSession {
-        val client = newHttpClient(30_000L)
+    private fun refreshToken(
+        authConfig: ModelPlazaAuthConfig,
+        refreshToken: String,
+        proxyUrl: String
+    ): CachedSession {
+        val client = newHttpClient(30_000L, proxyUrl)
         val response = sendJson(
             client = client,
             method = "POST",
@@ -360,11 +371,13 @@ internal object ModelPlazaAuthManager {
         return JsonHttpResponse(response.statusCode(), response.body())
     }
 
-    private fun newHttpClient(timeoutMillis: Long): HttpClient {
-        return HttpClient.newBuilder()
-            .connectTimeout(Duration.ofMillis(timeoutMillis))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build()
+    private fun newHttpClient(timeoutMillis: Long, proxyUrl: String): HttpClient {
+        return HttpProxySupport.configureJava(
+            HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(timeoutMillis))
+                .followRedirects(HttpClient.Redirect.NEVER),
+            proxyUrl
+        ).build()
     }
 
     private fun parseJsonResponse(response: JsonHttpResponse, operation: String): JsonObject {

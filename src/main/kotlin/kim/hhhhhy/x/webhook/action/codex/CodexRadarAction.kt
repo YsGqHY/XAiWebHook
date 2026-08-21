@@ -1,14 +1,13 @@
 package kim.hhhhhy.x.webhook.action.codex
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.ProxyBuilder
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
-import io.ktor.http.Url
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -70,10 +69,8 @@ internal object CodexRadarAction {
             connectTimeoutMillis = 15_000
             socketTimeoutMillis = 60_000
         }
-        if (proxyUrl.isNotBlank()) {
-            engine {
-                proxy = ProxyBuilder.http(Url(proxyUrl))
-            }
+        engine {
+            proxy = HttpProxySupport.ktorProxy(proxyUrl)
         }
     }
 
@@ -126,7 +123,7 @@ internal object CodexRadarAction {
         return CodexRadarFetchSpec(
             efficiencyUrl = efficiency,
             insightsUrl = insights,
-            proxyUrl = render(action.params["proxy"])
+            proxyUrl = HttpProxySupport.normalize(render(action.params["proxy"]))
         )
     }
 }

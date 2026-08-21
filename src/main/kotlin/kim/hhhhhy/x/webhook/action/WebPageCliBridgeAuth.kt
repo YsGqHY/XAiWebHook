@@ -1,6 +1,7 @@
 package kim.hhhhhy.x.webhook.action
 
 import kim.hhhhhy.x.webhook.XAiWebHook
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -28,10 +29,11 @@ internal object WebPageCliBridgeAuthClient {
                 "CLI bridge could not open the system browser; open manually while polling continues: " +
                     "$uri (${summarizeError(error)})"
             )
-        }
+        },
+        proxyUrl: String = ""
     ): BrowserTokenPair {
         val bridge = auth.spec.cliBridge ?: error("CLI bridge configuration is missing")
-        val client = newHttpClient(timeoutMillis)
+        val client = newHttpClient(timeoutMillis, proxyUrl)
         val startPayload = requestJson(
             client = client,
             method = "POST",
@@ -130,7 +132,8 @@ internal object WebPageCliBridgeAuthClient {
         auth: ResolvedBrowserAuth,
         delivered: BrowserDeliveredTokenPair,
         timeoutMillis: Long,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        proxyUrl: String = ""
     ): BrowserTokenPair {
         require(delivered.expiresAtMillis > nowMillis) {
             "CLI bridge delivered access token has expired"
@@ -139,7 +142,7 @@ internal object WebPageCliBridgeAuthClient {
             auth = auth,
             delivered = delivered,
             timeoutMillis = timeoutMillis,
-            client = newHttpClient(timeoutMillis)
+            client = newHttpClient(timeoutMillis, proxyUrl)
         )
     }
 
@@ -169,13 +172,14 @@ internal object WebPageCliBridgeAuthClient {
     fun refresh(
         auth: ResolvedBrowserAuth,
         timeoutMillis: Long,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        proxyUrl: String = ""
     ): BrowserTokenPair {
         val bridge = auth.spec.cliBridge ?: error("CLI bridge refresh configuration is missing")
         val previous = auth.tokenPair ?: error("CLI bridge refresh token pair is missing")
         val refreshToken = previous.refreshToken ?: error("CLI bridge refresh token is missing")
         val payload = requestJson(
-            client = newHttpClient(timeoutMillis),
+            client = newHttpClient(timeoutMillis, proxyUrl),
             method = "POST",
             url = bridge.refreshUrl,
             body = """{"refresh_token":${jsonString(refreshToken)}}""",
@@ -268,11 +272,13 @@ internal object WebPageCliBridgeAuthClient {
         return JsonHttpResponse(response.statusCode(), response.body())
     }
 
-    private fun newHttpClient(timeoutMillis: Long): HttpClient {
-        return HttpClient.newBuilder()
-            .connectTimeout(Duration.ofMillis(timeoutMillis.coerceAtLeast(1L)))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build()
+    private fun newHttpClient(timeoutMillis: Long, proxyUrl: String): HttpClient {
+        return HttpProxySupport.configureJava(
+            HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(timeoutMillis.coerceAtLeast(1L)))
+                .followRedirects(HttpClient.Redirect.NEVER),
+            proxyUrl
+        ).build()
     }
 
     private fun sleepBeforePoll(

@@ -3,6 +3,7 @@ package kim.hhhhhy.x.webhook.action
 import com.microsoft.playwright.APIRequest
 import com.microsoft.playwright.APIResponse
 import com.microsoft.playwright.options.RequestOptions
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -21,16 +22,17 @@ internal object WebPageCredentialAuthClient {
         apiRequest: APIRequest,
         auth: ResolvedBrowserAuth,
         timeoutMillis: Long,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        proxyUrl: String = ""
     ): BrowserTokenPair {
         val login = auth.spec.login ?: error("credential login configuration is missing")
         val credentials = auth.credentials ?: error("resolved browser credentials are missing")
-        val requestContext = apiRequest.newContext(
-            APIRequest.NewContextOptions()
-                .setFailOnStatusCode(false)
-                .setMaxRedirects(0)
-                .setTimeout(timeoutMillis.toDouble())
-        )
+        val options = APIRequest.NewContextOptions()
+            .setFailOnStatusCode(false)
+            .setMaxRedirects(0)
+            .setTimeout(timeoutMillis.toDouble())
+        HttpProxySupport.playwrightProxy(proxyUrl)?.let(options::setProxy)
+        val requestContext = apiRequest.newContext(options)
         try {
             val firstResponse = postJson(
                 requestContext = requestContext,
@@ -69,18 +71,19 @@ internal object WebPageCredentialAuthClient {
         apiRequest: APIRequest,
         auth: ResolvedBrowserAuth,
         timeoutMillis: Long,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        proxyUrl: String = ""
     ): BrowserTokenPair {
         val login = auth.spec.login ?: error("credential refresh configuration is missing")
         val previous = auth.tokenPair ?: error("credential refresh token pair is missing")
         val refreshToken = previous.refreshToken
             ?: error("credential refresh token is missing")
-        val requestContext = apiRequest.newContext(
-            APIRequest.NewContextOptions()
-                .setFailOnStatusCode(false)
-                .setMaxRedirects(0)
-                .setTimeout(timeoutMillis.toDouble())
-        )
+        val options = APIRequest.NewContextOptions()
+            .setFailOnStatusCode(false)
+            .setMaxRedirects(0)
+            .setTimeout(timeoutMillis.toDouble())
+        HttpProxySupport.playwrightProxy(proxyUrl)?.let(options::setProxy)
+        val requestContext = apiRequest.newContext(options)
         try {
             val response = postJson(
                 requestContext = requestContext,

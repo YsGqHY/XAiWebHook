@@ -2,6 +2,7 @@ package kim.hhhhhy.x.webhook.scraper
 
 import kim.hhhhhy.x.webhook.config.ModelPlazaConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -265,13 +266,15 @@ internal object ModelPlazaScraper {
             )
             val cacheDir = getCacheDir()
             val cookieCache = createCookieCache(cacheDir)
-            var accessToken = ModelPlazaAuthManager.getValidToken(auth, cacheDir)
+            var accessToken = ModelPlazaAuthManager.getValidToken(auth, cacheDir, config.proxyUrl)
             var refreshedAfterUnauthorized = false
             val endpoints = buildApiEndpoints(config.baseUrl)
-            val client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(config.timeoutMillis))
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .build()
+            val client = HttpProxySupport.configureJava(
+                HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofMillis(config.timeoutMillis))
+                    .followRedirects(HttpClient.Redirect.NEVER),
+                config.proxyUrl
+            ).build()
             var lastFailure: Throwable? = null
 
             for (endpoint in endpoints) {
@@ -290,7 +293,7 @@ internal object ModelPlazaScraper {
 
                 if (response.status == 401 && !refreshedAfterUnauthorized) {
                     WebHookDebug.log("[ModelPlaza] 接口返回 401，刷新登录态后重试一次")
-                    accessToken = ModelPlazaAuthManager.refreshAfterUnauthorized(auth, cacheDir)
+                    accessToken = ModelPlazaAuthManager.refreshAfterUnauthorized(auth, cacheDir, config.proxyUrl)
                     refreshedAfterUnauthorized = true
                     response = requestModelPlaza(client, endpoint, accessToken, config.timeoutMillis, cookieCache)
                 }

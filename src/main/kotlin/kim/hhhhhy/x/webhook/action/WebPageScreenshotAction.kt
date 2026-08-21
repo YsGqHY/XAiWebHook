@@ -24,6 +24,7 @@ import kim.hhhhhy.x.webhook.config.BrowserConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.TemplateEngine
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -1950,6 +1951,7 @@ internal object WebPageScreenshotAction {
                 }
             }
             val launchOptions = BrowserType.LaunchOptions().setHeadless(config.headless)
+            HttpProxySupport.playwrightProxy(config.proxyUrl)?.let(launchOptions::setProxy)
             if (config.executablePath != null) {
                 launchOptions.setExecutablePath(Paths.get(config.executablePath))
             } else if (config.channel != null) {
@@ -2068,7 +2070,8 @@ internal object WebPageScreenshotAction {
                 val tokenPair = WebPageCredentialAuthClient.login(
                     apiRequest = activePlaywright.request(),
                     auth = auth,
-                    timeoutMillis = config.timeoutMillis
+                    timeoutMillis = config.timeoutMillis,
+                    proxyUrl = config.proxyUrl
                 )
                 authFailures.remove(key)
                 withTokenPair(auth, tokenPair)
@@ -2112,7 +2115,8 @@ internal object WebPageScreenshotAction {
                     WebPageCliBridgeAuthClient.complete(
                         auth = auth,
                         delivered = pending.tokens,
-                        timeoutMillis = config.timeoutMillis
+                        timeoutMillis = config.timeoutMillis,
+                        proxyUrl = config.proxyUrl
                     )
                 } else {
                     WebPageCliBridgeAuthClient.login(
@@ -2120,7 +2124,8 @@ internal object WebPageScreenshotAction {
                         timeoutMillis = config.timeoutMillis,
                         onTokenDelivered = { delivered ->
                             pendingCliTokens[key] = PendingCliTokens(auth.spec, delivered)
-                        }
+                        },
+                        proxyUrl = config.proxyUrl
                     )
                 }
                 pendingCliTokens.remove(key)
@@ -2201,12 +2206,14 @@ internal object WebPageScreenshotAction {
                     WebPageCredentialAuthClient.refresh(
                         apiRequest = activePlaywright.request(),
                         auth = auth,
-                        timeoutMillis = config.timeoutMillis
+                        timeoutMillis = config.timeoutMillis,
+                        proxyUrl = config.proxyUrl
                     )
                 }
                 auth.spec.cliBridge != null -> WebPageCliBridgeAuthClient.refresh(
                     auth = auth,
-                    timeoutMillis = config.timeoutMillis
+                    timeoutMillis = config.timeoutMillis,
+                    proxyUrl = config.proxyUrl
                 )
                 else -> error("browser auth refresh source is missing")
             }
@@ -2243,12 +2250,12 @@ internal object WebPageScreenshotAction {
             val headerName = auth.spec.headerName ?: error("auth.bootstrap requires auth.header_name")
             val token = auth.token ?: error("auth.bootstrap token is missing")
             val activePlaywright = playwright ?: error("Playwright is not initialized")
-            val requestContext = activePlaywright.request().newContext(
-                APIRequest.NewContextOptions()
-                    .setFailOnStatusCode(false)
-                    .setMaxRedirects(0)
-                    .setTimeout(config.timeoutMillis.toDouble())
-            )
+            val requestOptions = APIRequest.NewContextOptions()
+                .setFailOnStatusCode(false)
+                .setMaxRedirects(0)
+                .setTimeout(config.timeoutMillis.toDouble())
+            HttpProxySupport.playwrightProxy(config.proxyUrl)?.let(requestOptions::setProxy)
+            val requestContext = activePlaywright.request().newContext(requestOptions)
             try {
                 val response = try {
                     requestContext.get(
