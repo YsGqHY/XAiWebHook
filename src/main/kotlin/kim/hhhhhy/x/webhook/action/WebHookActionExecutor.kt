@@ -24,6 +24,8 @@ import kim.hhhhhy.x.webhook.model.ActionResult
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.IncomingMessageSegment
 import kim.hhhhhy.x.webhook.template.TemplateEngine
+import kim.hhhhhy.x.webhook.util.HttpProxySupport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -55,10 +57,12 @@ internal object WebHookActionExecutor {
 
     private val clientLock = Any()
 
-    @Volatile
-    private var clientRef: HttpClient? = null
+    private val clients = mutableMapOf<String, HttpClient>()
 
-    private fun createClient(): HttpClient = HttpClient(CIO) {
+    private fun createClient(proxyUrl: String): HttpClient = HttpClient(CIO) {
+        engine {
+            proxy = HttpProxySupport.ktorProxy(proxyUrl)
+        }
         install(ContentNegotiation) {
             json(json)
         }
@@ -70,11 +74,9 @@ internal object WebHookActionExecutor {
     }
 
     // 插件禁用会 close client；再次启用时需要能够重建，避免复用已关闭实例
-    private fun client(): HttpClient {
-        clientRef?.let { return it }
-        return synchronized(clientLock) {
-            clientRef ?: createClient().also { clientRef = it }
-        }
+    private fun client(proxyUrl: String): HttpClient = synchronized(clientLock) {
+        val normalizedProxy = HttpProxySupport.normalize(proxyUrl)
+        clients.getOrPut(normalizedProxy) { createClient(normalizedProxy) }
     }
 
     suspend fun execute(actions: List<ActionConfig>, context: ExecutionContext): List<ActionResult> {
@@ -87,12 +89,15 @@ internal object WebHookActionExecutor {
             WebHookDebug.log("""[XAiWebHook] [动作] 执行动作
   type     : ${action.type}
   id       : ${action.id ?: "(内联)"}""")
-            results += runCatching { executeAction(action, context) }
-                .getOrElse { error ->
-                    XAiWebHook.logger.error("Action failed: ${action.type}", error)
-                    WebHookDebug.log("[XAiWebHook] [动作] 动作执行异常：type=${action.type} 原因=${error.message}")
-                    ActionResult(action.type, success = false, message = error.message ?: error::class.simpleName.orEmpty())
-                }
+            results += try {
+                executeAction(action, context)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                XAiWebHook.logger.error("Action failed: ${action.type}", error)
+                WebHookDebug.log("[XAiWebHook] [动作] 动作执行异常：type=${action.type} 原因=${error.message}")
+                ActionResult(action.type, success = false, message = error.message ?: error::class.simpleName.orEmpty())
+            }
         }
         return results
     }
@@ -103,11 +108,12 @@ internal object WebHookActionExecutor {
 
     fun close(): Unit {
         synchronized(clientLock) {
-            clientRef?.close()
-            clientRef = null
+            clients.values.forEach(HttpClient::close)
+            clients.clear()
         }
         CodexRadarAction.close()
         WebPageScreenshotAction.close()
+        kim.hhhhhy.x.webhook.polymarket.PolymarketClient.close()
     }
 
     private suspend fun executeAction(action: ActionConfig, context: ExecutionContext): ActionResult {
@@ -118,6 +124,7 @@ internal object WebHookActionExecutor {
             "send_codex_radar_report" -> sendCodexRadarReport(action, context)
             "query_model_plaza_models" -> ModelPlazaQueryAction.queryModels(action, context)
             "query_model_plaza_groups" -> ModelPlazaQueryAction.queryGroups(action, context)
+            "polymarket_search" -> PolymarketSearchAction.search(action, context)
             "http_request" -> httpRequest(action, context)
             "execute_command" -> executeCommand(action, context)
             "reply" -> reply(action, context)
@@ -293,8 +300,9 @@ internal object WebHookActionExecutor {
         val headerValues = TemplateEngine.render(action.params["headers"], context).asStringMap()
         val renderedBody = TemplateEngine.render(action.params["body"], context)
         val bodyText = renderedBody?.let { json.encodeToString(JsonElement.serializer(), toJsonElement(it)) }
+        val proxyUrl = httpRequestProxyUrl(action, context)
 
-        val response = client().request(url) {
+        val response = client(proxyUrl).request(url) {
             this.method = HttpMethod.parse(method)
             headers {
                 headerValues.forEach { (key, value) -> append(key, value) }
@@ -314,6 +322,10 @@ internal object WebHookActionExecutor {
             responseBody = responseText,
             status = response.status.value
         )
+    }
+
+    internal fun httpRequestProxyUrl(action: ActionConfig, context: ExecutionContext): String {
+        return HttpProxySupport.normalize(renderString(action.params["proxy"], context))
     }
 
     @OptIn(ExperimentalCommandDescriptors::class)

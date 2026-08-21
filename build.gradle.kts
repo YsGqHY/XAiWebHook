@@ -77,6 +77,36 @@ tasks.register<JavaExec>("codexRadarPreview") {
     System.getProperty("codex.proxy")?.let { systemProperty("codex.proxy", it) }
 }
 
+tasks.register<JavaExec>("polymarketLivePreview") {
+    group = "verification"
+    description = "Search Polymarket through the configured proxy and render the matched event summary"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("kim.hhhhhy.x.webhook.polymarket.PolymarketLivePreview")
+    systemProperty("file.encoding", "UTF-8")
+    args(
+        System.getProperty("polymarket.query")
+            ?: System.getProperty("polymarket.page")
+            ?: "GPT-6",
+        System.getProperty("polymarket.config") ?: "examples/webhook_config.yml",
+        System.getProperty("polymarket.output") ?: "build/tmp/polymarket-live/event-summary.txt"
+    )
+}
+
+tasks.register<JavaExec>("polymarketImagePreview") {
+    group = "verification"
+    description = "Search Polymarket and render the matched multi-market event to a local PNG"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("kim.hhhhhy.x.webhook.polymarket.PolymarketImagePreview")
+    systemProperty("file.encoding", "UTF-8")
+    args(
+        System.getProperty("polymarket.query")
+            ?: System.getProperty("polymarket.page")
+            ?: "GPT-6",
+        System.getProperty("polymarket.config") ?: "examples/webhook_config.yml",
+        System.getProperty("polymarket.image.output") ?: "build/polymarket-event-preview.png"
+    )
+}
+
 tasks.register<JavaExec>("playwrightInstallChromium") {
     group = "playwright"
     description = "Install the Playwright Chromium browser runtime"
