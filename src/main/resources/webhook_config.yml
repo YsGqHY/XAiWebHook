@@ -662,16 +662,14 @@ actions:
     type: "send_codex_radar_report"
     # 默认开启；本动作仅做 HTTP 拉取与本地 HTML 绘图，不需要 browser.enabled
     enabled: true
-    # 智力效率主数据源（静态快照，schema=2，约 370KB）。
-    # points 为 19 个「模型 × 思考档位」聚合点，含 iq、均价、均耗时与综合成本指数，
-    # 是站点「智力效率」面板的数据源，也是本动作 IQ 与评级的唯一主数据。
+    # 智力效率主数据源（静态聚合快照，数据点数量和附加字段随站点更新）。
+    # points/items 为「模型 × 思考档位」聚合项；iq 用于评级，其他指标按可用字段解析。
+    # 主数据源不可用时不会生成建议，避免基于缺失数据给出误导结论。
     efficiency_url: "https://codexradar.com/data/intelligence-efficiency.json?refresh=1"
-    # 洞察接口（约 29KB）。提供 recommendations 站长推荐分组，
-    # 以及 degradation_alerts 降智预警（每个档位只与自身 24h/48h 历史比较得出）。
+    # 洞察接口提供 recommendations 站长推荐分组与 degradation_alerts 降智预警。
+    # 洞察请求失败时仍可基于主数据源生成报告，但不含预警和推荐。
     insights_url: "https://codexradar.com/api/radar-insights?refresh=1"
-    # 说明：https://codexradar.com/api/intelligence-efficiency?refresh=1 是原始逐题评测矩阵
-    # （约 1.9MB，含 tasks/cells/combos 与每次跑分的贡献者明细）。
-    # 聚合结论已由上面两个接口提供，故本动作默认不拉取该接口，避免每次触发传输 1.9MB。
+    # 原始逐题评测矩阵接口含更细粒度明细；上面的聚合接口已满足本动作需求，默认不请求。
     # 当前 Codex 动作专用 HTTP(S) 代理；留空表示直连，不影响其他动作或功能。
     # 支持 http://127.0.0.1:7890、https://127.0.0.1:7890，以及 URL 中的可选用户名密码。
     # 注意：codexradar.com 在部分网络环境下仅 IPv6 可达，而 JVM 默认优先 IPv4，
