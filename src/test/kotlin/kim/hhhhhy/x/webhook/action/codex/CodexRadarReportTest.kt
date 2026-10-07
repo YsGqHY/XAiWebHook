@@ -8,6 +8,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -72,6 +73,47 @@ internal class CodexRadarReportTest {
             recommendations = CodexRadarParser.parseRecommendations(insights),
             sourceUpdatedAt = CodexRadarParser.sourceUpdatedAt(efficiency),
             alertRule = CodexRadarParser.alertRule(insights)
+        )
+    }
+
+    @Test
+    fun nonSuccessHttpResponseReportsStatusBeforeParsingBody(): Unit {
+        val failure = assertFailsWith<IllegalStateException> {
+            CodexRadarAction.ensureSuccessfulResponse(502)
+        }
+
+        assertEquals("HTTP 502", failure.message)
+    }
+
+    @Test
+    fun requiredEfficiencyFailureDistinguishesUnavailableFromUnsupportedPayload(): Unit {
+        val fetchFailure = assertFailsWith<IllegalStateException> {
+            CodexRadarAction.requireEfficiencyTiers(
+                efficiency = null,
+                failure = "HTTP 503"
+            )
+        }
+        assertEquals(
+            "required intelligence-efficiency fetch failed: HTTP 503",
+            fetchFailure.message
+        )
+
+        val unsupportedPayload = assertFailsWith<IllegalStateException> {
+            CodexRadarAction.requireEfficiencyTiers(
+                efficiency = json.parseToJsonElement("""{"history": []}"""),
+                failure = null
+            )
+        }
+        assertEquals(
+            "intelligence-efficiency response contained no supported data points",
+            unsupportedPayload.message
+        )
+        assertEquals(
+            10,
+            CodexRadarAction.requireEfficiencyTiers(
+                efficiency = json.parseToJsonElement(efficiencyPayload),
+                failure = null
+            ).size
         )
     }
 

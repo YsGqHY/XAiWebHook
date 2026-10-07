@@ -16,14 +16,10 @@ import kotlinx.serialization.json.JsonElement
 /**
  * 降智检测数据抓取与报告组装。
  *
- * 三个接口的分工（已实测确认）：
- * - /data/intelligence-efficiency.json：静态快照，schema=2，points 为 19 个
- *   「模型 × 思考档位」聚合点，含 iq / 均价 / 均耗时 / 综合成本指数，
- *   体积约 370KB，是智力效率面板的数据源，也是本功能的 IQ 主数据；
- * - /api/radar-insights：轻量接口（约 29KB），提供 recommendations
- *   站长推荐分组与 degradation_alerts 降智预警（每档位与自身历史比较）；
- * - /api/intelligence-efficiency：原始逐题评测矩阵（约 1.9MB），
- *   含 tasks/cells/combos 明细与每次跑分的贡献者记录，本功能默认不拉取。
+ * 数据源分工（字段、数据点数量与体积可能随站点更新）：
+ * - /data/intelligence-efficiency.json：智力效率主数据，points/items 为模型 × 思考档位聚合点；
+ * - /api/radar-insights：可选洞察数据，提供 recommendations 与 degradation_alerts；
+ * - /api/intelligence-efficiency：原始逐题评测明细，本功能默认不拉取。
  */
 internal object CodexRadarAction {
     private const val DEFAULT_EFFICIENCY_URL =
@@ -80,39 +76,68 @@ internal object CodexRadarAction {
         clientProxy = ""
     }
 
-    /** 抓取并归一化三个接口的数据。任一接口失败时按可用数据降级，IQ 主数据缺失才抛错。 */
+    /** 抓取并归一化数据。效率数据为必需项；洞察请求失败时仅缺少预警与推荐。 */
     suspend fun fetchSnapshot(spec: CodexRadarFetchSpec): RadarSnapshot {
-        val efficiency = fetchJson(spec.efficiencyUrl, "intelligence-efficiency", spec.proxyUrl)
-        val insights = fetchJson(spec.insightsUrl, "radar-insights", spec.proxyUrl)
-
-        val tiers = CodexRadarParser.parseTiers(efficiency)
-        require(tiers.isNotEmpty()) { "no intelligence efficiency data points parsed" }
+        val efficiencyResult = fetchJson(spec.efficiencyUrl, "intelligence-efficiency", spec.proxyUrl)
+        val insightsResult = fetchJson(spec.insightsUrl, "radar-insights", spec.proxyUrl)
+        val efficiency = efficiencyResult.value
+        val insights = insightsResult.value
+        val tiers = requireEfficiencyTiers(efficiency, efficiencyResult.failure)
+        val alerts = CodexRadarParser.parseAlerts(insights)
+        val recommendations = CodexRadarParser.parseRecommendations(insights)
 
         WebHookDebug.log(
             "[XAiWebHook] [降智检测] 已解析 ${tiers.size} 个档位数据点，" +
-                "降智预警 ${CodexRadarParser.parseAlerts(insights).size} 条"
+                "降智预警 ${alerts.size} 条"
         )
         return RadarSnapshot(
             tiers = tiers,
-            alerts = CodexRadarParser.parseAlerts(insights),
-            recommendations = CodexRadarParser.parseRecommendations(insights),
+            alerts = alerts,
+            recommendations = recommendations,
             sourceUpdatedAt = CodexRadarParser.sourceUpdatedAt(efficiency)
                 ?: CodexRadarParser.sourceUpdatedAt(insights),
             alertRule = CodexRadarParser.alertRule(insights)
         )
     }
 
-    private suspend fun fetchJson(url: String, tag: String, proxyUrl: String): JsonElement? {
-        if (url.isBlank()) return null
+    private suspend fun fetchJson(url: String, tag: String, proxyUrl: String): JsonFetchResult {
+        if (url.isBlank()) return JsonFetchResult(null, "URL is blank")
         return runCatching {
             WebHookDebug.log("[XAiWebHook] [降智检测] 请求 $tag：$url")
-            val text = client(proxyUrl).get(url).bodyAsText()
+            val response = client(proxyUrl).get(url)
+            ensureSuccessfulResponse(response.status.value)
+            val text = response.bodyAsText()
             // 大响应体解析放到 IO 线程，避免阻塞事件循环
-            withContext(Dispatchers.Default) { json.parseToJsonElement(text) }
+            val value = withContext(Dispatchers.Default) { json.parseToJsonElement(text) }
+            JsonFetchResult(value, null)
         }.getOrElse { error ->
-            CodexRadarLog.warning("Codex radar fetch failed tag=$tag: ${error.message}")
-            WebHookDebug.log("[XAiWebHook] [降智检测] $tag 请求失败：${error.message}")
-            null
+            val failure = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+            CodexRadarLog.warning("Codex radar fetch failed tag=$tag: $failure")
+            WebHookDebug.log("[XAiWebHook] [降智检测] $tag 请求失败：$failure")
+            JsonFetchResult(null, failure)
+        }
+    }
+
+    /** 非 2xx 响应在读取/解析正文前失败，避免把错误页误判为 JSON 格式错误。 */
+    internal fun ensureSuccessfulResponse(statusCode: Int): Unit {
+        if (statusCode !in 200..299) {
+            throw IllegalStateException("HTTP $statusCode")
+        }
+    }
+
+    /** 必需主数据不可用与响应成功但 schema 不兼容时，提供不同的内部错误。 */
+    internal fun requireEfficiencyTiers(
+        efficiency: JsonElement?,
+        failure: String?
+    ): List<RadarTier> {
+        if (efficiency == null) {
+            val detail = failure?.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()
+            throw IllegalStateException("required intelligence-efficiency fetch failed$detail")
+        }
+        return CodexRadarParser.parseTiers(efficiency).ifEmpty {
+            throw IllegalStateException(
+                "intelligence-efficiency response contained no supported data points"
+            )
         }
     }
 
@@ -127,6 +152,11 @@ internal object CodexRadarAction {
         )
     }
 }
+
+private data class JsonFetchResult(
+    val value: JsonElement?,
+    val failure: String?
+)
 
 internal data class CodexRadarFetchSpec(
     val efficiencyUrl: String,
