@@ -70,11 +70,14 @@ tasks.test {
 
 tasks.register<JavaExec>("codexRadarPreview") {
     group = "verification"
-    description = "Fetch live Codex radar data and render the chart to build/codex-radar-preview.png"
+    description = "Open Codex Radar in the configured browser, scrape both score panels, and render build/codex-radar-preview.png"
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("kim.hhhhhy.x.webhook.action.codex.CodexRadarPreview")
-    // 站点在部分网络下仅 IPv6 可达；可用 -Dcodex.proxy= 指定代理或置空直连
+    // 可用 -Dcodex.proxy= 覆盖浏览器代理；留空表示使用 webhook_config.yml 的 browser.proxy
     System.getProperty("codex.proxy")?.let { systemProperty("codex.proxy", it) }
+    System.getProperty("codex.cache.dir")?.let { systemProperty("codex.cache.dir", it) }
+    System.getProperty("codex.cache.file")?.let { systemProperty("codex.cache.file", it) }
+    System.getProperty("codex.cache.clear")?.let { systemProperty("codex.cache.clear", it) }
 }
 
 tasks.register<JavaExec>("polymarketLivePreview") {

@@ -2,6 +2,7 @@ package kim.hhhhhy.x.webhook.action
 
 import com.microsoft.playwright.PlaywrightException
 import com.microsoft.playwright.TimeoutError
+import kim.hhhhhy.x.webhook.api.BrowserTextListItem
 import kim.hhhhhy.x.webhook.api.BrowserTextListRequest
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
@@ -49,6 +50,171 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun browserTextListOptionalAttributesRemainBackwardCompatible(): Unit {
+        val legacy = BrowserTextListRequest(
+            actionId = "query",
+            partId = "main",
+            itemSelector = ".item",
+            statusRelativeSelector = ".status"
+        )
+        assertTrue(legacy.containerAttributes.isEmpty())
+        assertTrue(legacy.itemAttributes.isEmpty())
+        assertEquals(null, legacy.containerSelector)
+
+        val extended = BrowserTextListRequest(
+            "query",
+            "main",
+            ".item",
+            ".name",
+            ".status",
+            null,
+            128,
+            "#container",
+            listOf("data-state", "data-radar-query-pending"),
+            listOf("data-status")
+        )
+        assertEquals("#container", extended.containerSelector)
+        assertEquals(listOf("data-state", "data-radar-query-pending"), extended.containerAttributes)
+        assertEquals(listOf("data-status"), extended.itemAttributes)
+
+        val item = BrowserTextListItem(
+            1,
+            "model",
+            "model high",
+            "100",
+            null,
+            null,
+            null,
+            mapOf("data-status" to "ready")
+        )
+        assertEquals("ready", item.attributes["data-status"])
+    }
+
+    @Test
+    fun polledTextQueryKeepsOnePageUntilStableAndReleasesOnTimeout(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val pageCalls = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            pageCalls.incrementAndGet()
+            exchange.respondHtml(
+                """
+                <!doctype html>
+                <html><body>
+                  <main id="panel" data-state="loading">
+                    <div class="item"><span class="name">GPT-6 Astra high</span><span class="status">—</span></div>
+                  </main>
+                  <script>
+                    setTimeout(() => {
+                      const panel = document.getElementById('panel')
+                      panel.dataset.state = 'ready'
+                      panel.querySelector('.status').textContent = '100'
+                    }, 350)
+                  </script>
+                </body></html>
+                """.trimIndent()
+            )
+        }
+        server.start()
+
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            timeoutMillis = 5_000L,
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val executionContext = ExecutionContext(config.copy(browser = browserConfig))
+        val action = ActionConfig(
+            id = "polling",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "screenshot" to mapOf(
+                    "parts" to listOf(
+                        mapOf(
+                            "id" to "main",
+                            "url" to "$baseUrl/",
+                            "wait_until" to "domcontentloaded",
+                            "timeout_ms" to 5_000,
+                            "selector" to "body"
+                        )
+                    )
+                )
+            )
+        )
+        val request = BrowserTextListRequest(
+            "polling",
+            "main",
+            "#panel .item",
+            ".name",
+            ".status",
+            null,
+            128,
+            "#panel",
+            listOf("data-state"),
+            emptyList()
+        )
+
+        WebPageScreenshotAction.reset()
+        WebPageScreenshotAction.open()
+        try {
+            val first = runBlocking {
+                WebPageScreenshotAction.queryTextListsUntil(
+                    action = action,
+                    context = executionContext,
+                    requests = listOf(request),
+                    maxWaitMillis = 5_000L,
+                    pollIntervalMillis = 200L,
+                    stablePolls = 2,
+                    readiness = { current, _ ->
+                        current.single().containerAttributes["data-state"] == "ready" &&
+                            current.single().items.single().statusText == "100"
+                    }
+                )
+            }
+            assertEquals("ready", first.single().containerAttributes["data-state"])
+            assertEquals("100", first.single().items.single().statusText)
+            assertEquals(1, pageCalls.get())
+
+            assertFailsWith<BrowserTextQueryTimeoutException> {
+                runBlocking {
+                    WebPageScreenshotAction.queryTextListsUntil(
+                        action = action,
+                        context = executionContext,
+                        requests = listOf(request),
+                        maxWaitMillis = 1_000L,
+                        pollIntervalMillis = 200L,
+                        stablePolls = 2,
+                        readiness = { _, _ -> false }
+                    )
+                }
+            }
+
+            val afterTimeout = runBlocking {
+                WebPageScreenshotAction.queryTextListsUntil(
+                    action = action,
+                    context = executionContext,
+                    requests = listOf(request),
+                    maxWaitMillis = 5_000L,
+                    pollIntervalMillis = 200L,
+                    stablePolls = 2,
+                    readiness = { current, _ ->
+                        current.single().containerAttributes["data-state"] == "ready" &&
+                            current.single().items.single().statusText == "100"
+                    }
+                )
+            }
+            assertEquals("100", afterTimeout.single().items.single().statusText)
+            assertEquals(3, pageCalls.get())
+        } finally {
+            WebPageScreenshotAction.reset()
+            server.stop(0)
+        }
+    }
+
+    @Test
     fun defaultYamlContainsReusableScreenshotAction(): Unit {
         val root = WebPageScreenshotActionTest::class.java.getResourceAsStream("/webhook_config.yml").use { input ->
             requireNotNull(input)
@@ -77,7 +243,8 @@ internal class WebPageScreenshotActionTest {
                 "hk2.geek2api.com",
                 "hk3.geek2api.com",
                 "hk4.geek2api.com",
-                "hk5.geek2api.com"
+                "hk5.geek2api.com",
+                "codexradar.com"
             ),
             browser["allowed_hosts"]
         )
