@@ -2,6 +2,7 @@ package kim.hhhhhy.x.webhook
 
 import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
 import kim.hhhhhy.x.webhook.action.WebPageScreenshotAction
+import kim.hhhhhy.x.webhook.action.codex.CodexRadarAction
 import kim.hhhhhy.x.webhook.command.XAiWebHookCommand
 import kim.hhhhhy.x.webhook.config.WebHookConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
@@ -51,6 +52,7 @@ public object XAiWebHook : KotlinPlugin(
         WebHookDebug.log("[XAiWebHook] 插件启动中...")
         WebHookDebug.log("[XAiWebHook] 正在加载配置文件...")
         WebHookConfig.load()
+        CodexRadarAction.startRefreshScheduler(WebHookConfig.current)
         WebHookDebug.log("[XAiWebHook] 正在注册 outgoing 冷却绕过权限...")
         PERMISSION_COOLDOWN_BYPASS
         WebHookEventListener.clearCooldowns()
@@ -60,6 +62,7 @@ public object XAiWebHook : KotlinPlugin(
         CommandManager.registerCommand(XAiWebHookCommand)
         WebHookDebug.log("[XAiWebHook] 正在启动 WebHook HTTP 服务...")
         WebHookServer.start(WebHookConfig.current)
+        CodexRadarAction.warmupCaches(WebHookConfig.current)
         logger.info("XAiWebHook enabled")
         WebHookDebug.log("[XAiWebHook] 插件启动完成")
     }

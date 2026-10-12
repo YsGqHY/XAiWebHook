@@ -1,29 +1,59 @@
 package kim.hhhhhy.x.webhook.action.codex
 
+import kim.hhhhhy.x.webhook.action.HtmlImageRenderer
+import java.util.LinkedHashMap
+import java.util.LinkedHashSet
+import java.util.Locale
+
 /**
- * 生成降智检测图表 HTML。
+ * 将 Codex Radar 的雷达分和社区体感分排版为单张静态图片 HTML。
  *
- * 底层渲染器为 openhtmltopdf（CSS 2.1），不支持 flex/grid/CSS 变量，
- * 因此整体使用 table 布局 + 固定列宽实现卡片网格。
+ * openhtmltopdf 只支持 CSS 2.1 的稳定子集，因此矩阵使用 table-layout: fixed，
+ * 不使用 flex、grid 或 CSS 变量。两种分数保持独立量表，不做等级判断或颜色混合。
  */
 internal class CodexRadarChart(
-    private val advisor: CodexRadarAdvisor,
     private val options: CodexRadarChartOptions
 ) {
-    fun render(report: RadarReport): String {
-        // 各模型档位数量不同（Luna 无 ultra、GPT-5.5 只有两档），
-        // table-layout: fixed 会按当行列数均分宽度，导致列宽在行间不一致。
-        // 统一按最大档位数补空白单元格，保证所有卡片等宽对齐。
-        val columns = report.tiersByModel.values.maxOfOrNull { it.size } ?: 0
+    fun render(snapshot: CodexRadarSnapshot): String {
+        val models = modelOrder(snapshot)
         val body = buildString {
-            append(header(report))
-            append(alertBanner(report))
-            report.tiersByModel.forEach { (model, tiers) ->
-                val advice = report.advices.firstOrNull { it.model == model }
-                append(modelSection(model, tiers, advice, report, columns))
+            append(header(snapshot))
+            if (snapshot.partial) {
+                append(
+                    "<div class=\"partial-notice\">页面等待超时，仅展示已读取的有效数据；“—”或 pending 条目已忽略。</div>"
+                )
             }
-            append(adviceSection(report))
-            append(footer(report))
+            append(
+                scoreSection(
+                    title = "雷达分",
+                    scale = "/150",
+                    description = "站点雷达效率得分，满分 150",
+                    notes = listOf(
+                        "雷达分按百分制成绩 × 1.5 计分（满分150分）",
+                        "64道题覆盖软件工程、空间推理、计算机视觉、终端工具使用、系统工程、科研计算与数据分析"
+                    ),
+                    accentClass = "radar",
+                    scores = snapshot.radarScores,
+                    models = models,
+                    showRatingCount = false
+                )
+            )
+            append(
+                scoreSection(
+                    title = "社区体感分",
+                    scale = "/10",
+                    description = "社区盲测平均体感，满分 10；附评分人数",
+                    notes = listOf(
+                        "当前展示滚动7天社区体感分",
+                        "同一模型按每位蹬友窗口内最新一次评分计算"
+                    ),
+                    accentClass = "community",
+                    scores = snapshot.communityScores,
+                    models = models,
+                    showRatingCount = true
+                )
+            )
+            append(footer())
         }
 
         return """
@@ -33,291 +63,276 @@ internal class CodexRadarChart(
               <meta charset="UTF-8" />
               <style>${styleSheet()}</style>
             </head>
-            <body><div class="card">$body</div></body>
+            <body><div class="canvas">$body</div></body>
             </html>
         """.trimIndent()
     }
 
-    private fun header(report: RadarReport): String {
-        val updated = report.sourceUpdatedAt?.let { escape(CodexRadarTime.toDisplay(it)) } ?: "-"
-        val alertCount = report.alerts.size
-        // 圆角需作用在内联 span 上；openhtmltopdf 对 td 的 border-radius 支持不稳定
-        val badge = if (alertCount > 0) {
-            """<td class="hd-badge"><span class="pill alert">● $alertCount 个降智预警</span></td>"""
-        } else {
-            """<td class="hd-badge"><span class="pill ok">● 无降智预警</span></td>"""
-        }
+    /** 使用现有 HTML 渲染器生成 PNG，并校验其确实带有 PNG 文件头。 */
+    fun renderPng(snapshot: CodexRadarSnapshot): ByteArray {
+        val bytes = HtmlImageRenderer.render(render(snapshot))
+        check(bytes.startsWithPngSignature()) { "Codex Radar chart renderer produced invalid PNG data" }
+        return bytes
+    }
+
+    private fun header(snapshot: CodexRadarSnapshot): String {
+        val generatedAt = snapshot.generatedAtText.trim().ifBlank { "—" }
         return """
-            <table class="hd"><tr>
-              <td class="hd-main">
-                <div class="hd-title">${escape(options.title)}</div>
-                <div class="hd-sub">${escape(options.subtitle)}</div>
+            <table class="header"><tr>
+              <td class="header-main">
+                <div class="header-title">${escape(options.title)}</div>
+                <div class="header-subtitle">${escape(options.subtitle)}</div>
               </td>
-              $badge
+              <td class="header-time">
+                <div class="header-time-label">生成时间</div>
+                <div class="header-time-value">${escape(generatedAt)}</div>
+              </td>
             </tr></table>
-            <div class="hd-meta">数据更新 $updated · 生成 ${escape(report.generatedAtText)}</div>
+            <div class="header-rule"></div>
         """.trimIndent()
     }
 
-    private fun alertBanner(report: RadarReport): String {
-        if (report.alerts.isEmpty()) return ""
-        val rows = report.alerts.take(4).joinToString("") { alert ->
-            val name = escape(
-                advisor.modelLabel(alert.model) + " " + advisor.effortLabel(alert.effort) +
-                    " " + advisor.officialEffortLabel(alert.effort)
-            )
-            val drops = listOfNotNull(
-                alert.dropFrom24h?.let { "24h -" + String.format("%.1f", it) },
-                alert.dropFrom48h?.let { "48h -" + String.format("%.1f", it) }
-            ).joinToString(" / ").ifBlank { "持续下降" }
-            // 预警 iq 取自 radar-insights 的最新单次采样，档位卡片取自
-            // intelligence-efficiency 的聚合值，两者会有零点几的差异。
-            // 同一张图里对同一档位显示两个数字会被当成 bug，故统一优先用卡片值。
-            val iq = report.tierOf(alert.key)?.iq ?: alert.iq
-            """<tr><td class="al-n">$name</td><td class="al-i">${
-                iq?.let { formatIq(it) } ?: "-"
-            }</td><td class="al-d">${escape(drops)}</td></tr>"""
-        }
-        return """<div class="al-wrap"><div class="al-hd">降智预警</div>
-            <table class="al">$rows</table></div>""".trimIndent()
-    }
-
-    private fun modelSection(
-        model: String,
-        tiers: List<RadarTier>,
-        advice: RadarModelAdvice?,
-        report: RadarReport,
-        columns: Int
+    private fun scoreSection(
+        title: String,
+        scale: String,
+        description: String,
+        notes: List<String>,
+        accentClass: String,
+        scores: List<CodexRadarScore>,
+        models: List<String>,
+        showRatingCount: Boolean
     ): String {
-        val label = escape(advisor.modelLabel(model))
-        val alertedKeys = report.alerts.map { it.key }.toSet()
-        // 「建议」标签语义是「换到这一档」，仅在确实需要切换时才打。
-        // NORMAL 判定下 target 等于基准档位，若照打会与「智商正常」徽标自相矛盾。
-        val recommendedKey = advice
-            ?.takeIf { it.verdict == RadarVerdict.SWITCH || it.verdict == RadarVerdict.DEGRADED }
-            ?.target?.key
-        val cells = tiers.joinToString("") { tier ->
-            tierCell(
-                tier = tier,
-                grade = report.grades[tier.key],
-                alerted = tier.key in alertedKeys,
-                recommended = recommendedKey != null && tier.key == recommendedKey
-            )
-        } + """<td class="cell-void"></td>""".repeat((columns - tiers.size).coerceAtLeast(0))
-        val badge = advice?.let { verdictBadge(it) } ?: ""
+        val scoreIndex = indexScores(scores)
+        val rows = if (models.isEmpty()) {
+            """
+                <tr><td class="empty-row" colspan="7">暂无可显示分数</td></tr>
+            """.trimIndent()
+        } else {
+            models.joinToString("") { model ->
+                modelRow(
+                    model = model,
+                    scoreIndex = scoreIndex,
+                    showRatingCount = showRatingCount
+                )
+            }
+        }
+        val effortHeaders = EFFORT_ORDER.joinToString("") { effort ->
+            "<th class=\"effort-heading\"><span>${escape(effort)}</span></th>"
+        }
+
         return """
-            <div class="sec">
-              <table class="sec-hd"><tr>
-                <td class="sec-name">$label</td>
-                <td class="sec-badge">$badge</td>
+            <div class="score-panel $accentClass">
+              <table class="section-heading"><tr>
+                <td class="section-heading-main">${escape(title)}</td>
+                <td class="section-scale">${escape(scale)}</td>
               </tr></table>
-              <table class="grid"><tr>$cells</tr></table>
+              <div class="section-description">${escape(description)}</div>
+              <div class="section-notes">${notes.joinToString("") { note ->
+                  "<div class=\"section-note\">${escape(note)}</div>"
+              }}</div>
+              <table class="score-matrix">
+                <colgroup>
+                  <col class="model-column" />
+                  <col class="effort-column" /><col class="effort-column" />
+                  <col class="effort-column" /><col class="effort-column" />
+                  <col class="effort-column" /><col class="effort-column" />
+                </colgroup>
+                <thead><tr>
+                  <th class="model-heading">模型</th>
+                  $effortHeaders
+                </tr></thead>
+                <tbody>$rows</tbody>
+              </table>
             </div>
         """.trimIndent()
     }
 
-    private fun tierCell(
-        tier: RadarTier,
-        grade: RadarGrade?,
-        alerted: Boolean,
-        recommended: Boolean
+    private fun modelRow(
+        model: String,
+        scoreIndex: Map<String, Map<String, CodexRadarScore>>,
+        showRatingCount: Boolean
     ): String {
-        val resolved = grade ?: advisor.grade(tier.iq)
-        val classes = buildString {
-            append("cell")
-            if (alerted) append(" cell-alert")
-            if (recommended) append(" cell-pick")
-        }
-        val mark = when {
-            alerted -> """<span class="tag tag-alert">降智</span>"""
-            recommended -> """<span class="tag tag-pick">建议</span>"""
-            else -> ""
+        val scores = scoreIndex[model].orEmpty()
+        val cells = EFFORT_ORDER.joinToString("") { effort ->
+            scoreCell(scores[effort], showRatingCount)
         }
         return """
-            <td class="$classes">
-              <div class="cell-effort">${escape(advisor.effortLabel(tier.effort))}<span
-                class="cell-effort-official">${escape(advisor.officialEffortLabel(tier.effort))}</span>$mark</div>
-              <div class="cell-iq" style="color:${resolved.color}">${formatIq(tier.iq)}</div>
-              <div class="cell-grade" style="color:${resolved.color}">${escape(resolved.label)}</div>
-              <div class="cell-meta">${formatPrice(tier.priceUsd)} · ${formatMinutes(tier.minutes)}</div>
-            </td>
+            <tr>
+              <th class="model-cell"><div class="model-box">${escape(model)}</div></th>
+              $cells
+            </tr>
         """.trimIndent()
     }
 
-    private fun verdictBadge(advice: RadarModelAdvice): String {
-        val (text, css) = when (advice.verdict) {
-            RadarVerdict.NORMAL -> "智商正常" to "vb-ok"
-            RadarVerdict.SWITCH -> advice.target?.effort.orEmpty().let { effort ->
-                "建议换" + advisor.effortLabel(effort) + " " + advisor.officialEffortLabel(effort)
-            } to "vb-warn"
-            RadarVerdict.DEGRADED -> "全档位降智" to "vb-bad"
-            RadarVerdict.UNKNOWN -> "暂无数据" to "vb-none"
+    private fun scoreCell(score: CodexRadarScore?, showRatingCount: Boolean): String {
+        val scoreText = score?.let { formatScore(it.value) } ?: "—"
+        val scoreClass = if (score?.value?.isFinite() == true) {
+            "score-value"
+        } else {
+            "score-value score-missing"
         }
-        return """<span class="vb $css">${escape(text)}</span>"""
-    }
-
-    private fun adviceSection(report: RadarReport): String {
-        val rows = report.advices.joinToString("") { advice ->
-            val css = when (advice.verdict) {
-                RadarVerdict.NORMAL -> "ad-ok"
-                RadarVerdict.SWITCH -> "ad-warn"
-                RadarVerdict.DEGRADED -> "ad-bad"
-                RadarVerdict.UNKNOWN -> "ad-none"
-            }
-            """<tr><td class="ad-dot $css">●</td><td class="ad-txt">${escape(advice.advice)}</td></tr>"""
+        val meta = if (showRatingCount) {
+            val count = score?.ratingCount
+                ?.takeIf { it >= 0 }
+                ?.let { String.format(Locale.ROOT, "%,d 人评分", it) }
+                ?: "评分人数 —"
+            "<div class=\"score-meta\">${escape(count)}</div>"
+        } else {
+            ""
         }
         return """
-            <div class="ad-wrap">
-              <div class="ad-hd">${escape(options.adviceTitle)}</div>
-              <table class="ad">$rows</table>
+            <td class="score-cell"><div class="score-box">
+              <div class="$scoreClass">$scoreText</div>
+              $meta
+            </div></td>
+        """.trimIndent()
+    }
+
+    private fun footer(): String {
+        val customFooter = options.footer.trim().ifBlank { "数据来源：Codex Radar 页面抓取" }
+        return """
+            <div class="footer">
+              <div class="footer-custom">${escape(customFooter)}</div>
+              <div class="footer-note">
+                数据来源：Codex Radar 页面抓取；雷达分与社区体感分采用不同量表，不可直接比较；“—”表示该模型或档位缺少有效分数，不代表 0。
+              </div>
             </div>
         """.trimIndent()
     }
 
-    private fun footer(report: RadarReport): String {
-        val recs = report.recommendations.take(4).joinToString("") { group ->
-            val items = group.items.take(2).joinToString("，") { item ->
-                // 推荐项 iq 与预警同理：来自 radar-insights 的另一次采样，
-                // 与档位卡片的聚合值有零点几差异，统一以卡片值为准
-                val iq = report.tierOf(item.key)?.iq ?: item.iq
-                advisor.modelLabel(item.model) + " " + advisor.effortLabel(item.effort) +
-                    " " + advisor.officialEffortLabel(item.effort) +
-                    (iq?.let { " " + formatIq(it) } ?: "")
-            }
-            """<tr><td class="ft-k">${escape(group.title)}</td><td class="ft-v">${escape(items)}</td></tr>"""
+    private fun modelOrder(snapshot: CodexRadarSnapshot): List<String> {
+        val models = LinkedHashSet<String>()
+        (snapshot.radarScores + snapshot.communityScores).forEach { score ->
+            score.model.trim().ifBlank { null }?.let(models::add)
         }
-        val recBlock = if (recs.isBlank()) "" else """<table class="ft-rec">$recs</table>"""
-        return """$recBlock<div class="ft">${escape(options.footer)}</div>"""
+        return models.toList()
     }
+
+    private fun indexScores(scores: List<CodexRadarScore>): Map<String, Map<String, CodexRadarScore>> {
+        val indexed = LinkedHashMap<String, MutableMap<String, CodexRadarScore>>()
+        scores.forEach { score ->
+            val model = score.model.trim()
+            val effort = score.effort.trim().lowercase(Locale.ROOT)
+            if (model.isBlank() || effort !in EFFORT_ORDER) return@forEach
+            val byEffort = indexed.getOrPut(model) { LinkedHashMap() }
+            if (!byEffort.containsKey(effort)) {
+                byEffort[effort] = score
+            }
+        }
+        return indexed
+    }
+
+    private fun formatScore(value: Double): String =
+        if (value.isFinite()) String.format(Locale.ROOT, "%.1f", value) else "—"
 
     private fun escape(value: String): String = value
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("\"", "&quot;")
-
-    private fun formatIq(value: Double): String = String.format("%.1f", value)
-
-    private fun formatPrice(value: Double?): String =
-        if (value == null) "-" else "$" + String.format("%.1f", value)
-
-    private fun formatMinutes(value: Double?): String =
-        if (value == null) "-" else "${Math.round(value)}分"
+        .replace("'", "&#39;")
 
     private fun styleSheet(): String = """
-        @page { size: ${options.widthPx}px; margin: 0; }
+        @page { size: ${options.widthPx.coerceIn(900, 3000)}px; margin: 0; }
         * { box-sizing: border-box; }
         body {
-          margin: 0; padding: 30px;
-          background: #f4f6fb; color: #101828;
+          margin: 0; padding: 28px;
+          background: #f4eee4; color: #1d2829;
           font-family: "Microsoft YaHei", "Noto Sans CJK SC", "SimHei", sans-serif;
+          font-size: 16px;
         }
-        .card {
-          padding: 30px 32px 24px;
-          border: 1px solid #dfe4ee; border-radius: 18px; background: #ffffff;
+        .canvas {
+          padding: 28px 30px 24px;
+          border: 1px solid #e3d8c9; border-radius: 18px;
+          background: #fffdf8;
         }
-        .hd { width: 100%; border-collapse: collapse; }
-        .hd-main { vertical-align: top; }
-        .hd-title { color: #0b1324; font-size: 40px; font-weight: 700; line-height: 1.15; }
-        .hd-sub { margin-top: 6px; color: #667085; font-size: 18px; letter-spacing: 1px; }
-        .hd-badge { width: 240px; text-align: right; vertical-align: top; }
-        .pill {
-          /* openhtmltopdf 不会把过大的 border-radius 按盒尺寸等比收敛，
-             999px 会被画成椭圆，这里用固定小半径保证圆角矩形 */
-          padding: 7px 16px; border-radius: 8px;
-          font-size: 17px; font-weight: 700; white-space: nowrap;
+        .header { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        .header-main { vertical-align: top; padding-right: 20px; }
+        .header-title {
+          color: #172526; font-size: 38px; font-weight: 700; line-height: 1.15;
+          word-wrap: break-word;
         }
-        .pill.alert { border: 1px solid #fca5a5; background: #fef2f2; color: #dc2626; }
-        .pill.ok { border: 1px solid #a7f3d0; background: #ecfdf5; color: #059669; }
-        .hd-meta {
-          margin-top: 14px; padding-bottom: 14px;
-          border-bottom: 2px solid #eef1f6; color: #98a2b3; font-size: 16px;
+        .header-subtitle {
+          margin-top: 8px; color: #627274; font-size: 18px; line-height: 1.35;
+          word-wrap: break-word;
         }
-        .al-wrap {
-          margin-top: 18px; padding: 14px 16px;
-          border: 1px solid #fcd34d; border-radius: 12px; background: #fffbeb;
-        }
-        .al-hd { color: #b45309; font-size: 19px; font-weight: 700; }
-        .al { width: 100%; margin-top: 8px; border-collapse: collapse; }
-        .al td { padding: 5px 0; font-size: 17px; }
-        .al-n { color: #92400e; font-weight: 700; }
-        .al-i { width: 90px; color: #dc2626; font-weight: 700; text-align: right; }
-        .al-d { width: 240px; color: #b45309; text-align: right; }
-        /* 每个模型分段套一层浅色分组容器：24 张卡片仅靠间距分隔时归属关系不清 */
-        .sec {
-          margin-top: 16px; padding: 14px 5px 15px;
-          border: 1px solid #eaeef4; border-radius: 14px; background: #fcfdff;
-        }
-        /* .grid 的 border-spacing 会让卡片内缩 9px，标题同步补 9px 才能与卡片左右对齐 */
-        .sec-hd { width: 100%; padding: 0 9px; border-collapse: collapse; }
-        .sec-name { color: #1d2939; font-size: 23px; font-weight: 700; }
-        .sec-badge { text-align: right; }
-        .vb {
-          padding: 5px 14px; border-radius: 8px;
-          font-size: 17px; font-weight: 700;
-        }
-        .vb-ok { border: 1px solid #a7f3d0; background: #ecfdf5; color: #047857; }
-        .vb-warn { border: 1px solid #fcd34d; background: #fffbeb; color: #b45309; }
-        .vb-bad { border: 1px solid #fca5a5; background: #fef2f2; color: #b91c1c; }
-        .vb-none { border: 1px solid #e4e7ec; background: #f9fafb; color: #667085; }
-        .grid {
-          width: 100%; margin-top: 10px;
-          border-collapse: separate; border-spacing: 9px 0; table-layout: fixed;
-        }
-        .cell {
-          padding: 12px 12px 11px;
-          border: 1px solid #e4e7ec; border-radius: 12px;
-          background: #fbfcfe; vertical-align: top;
-        }
-        .cell-void { border: 0; background: transparent; }
-        .cell-alert { border: 2px solid #f87171; background: #fef2f2; }
-        .cell-pick { border: 2px solid #34d399; background: #f0fdf4; }
-        .cell-effort { color: #475467; font-size: 15px; font-weight: 700; }
-        /* 官方名用等宽字体弱化显示，与中文名区分，便于直接照抄为传参值 */
-        .cell-effort-official {
-          margin-left: 5px; color: #98a2b3;
+        .header-time {
+          width: 170px; vertical-align: top; text-align: right;
           font-family: "Consolas", "JetBrains Mono", "Courier New", monospace;
-          font-size: 13px; font-weight: 400;
         }
-        .cell-iq { margin-top: 4px; font-size: 33px; font-weight: 700; line-height: 1.1; }
-        .cell-grade { margin-top: 2px; font-size: 15px; font-weight: 700; }
-        .cell-meta { margin-top: 4px; color: #98a2b3; font-size: 14px; }
-        .tag {
-          margin-left: 5px; padding: 1px 6px;
-          border-radius: 5px; font-size: 12px; font-weight: 700;
+        .header-time-label { color: #8b9898; font-size: 16px; }
+        .header-time-value { margin-top: 6px; color: #455657; font-size: 16px; word-wrap: break-word; }
+        .header-rule { margin-top: 18px; border-bottom: 2px solid #ece2d5; }
+        .score-panel { margin-top: 24px; padding: 18px 18px 16px; border: 1px solid #eadfd1; border-radius: 14px; }
+        .score-panel.radar { background: #f6fbfa; border-color: #c5dfdc; }
+        .score-panel.community { background: #fff9f1; border-color: #ead3b6; }
+        .section-heading { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        .section-heading-main { font-size: 26px; font-weight: 700; vertical-align: baseline; }
+        .section-scale {
+          width: 110px; color: #4c5d5e; font-size: 24px; font-weight: 700;
+          text-align: right; vertical-align: baseline;
+          font-family: "Consolas", "JetBrains Mono", "Courier New", monospace;
         }
-        .tag-alert { background: #fee2e2; color: #b91c1c; }
-        .tag-pick { background: #d1fae5; color: #047857; }
-        .ad-wrap {
-          margin-top: 24px; padding: 16px 18px;
-          border: 1px solid #dbeafe; border-radius: 14px; background: #f5f9ff;
+        .radar .section-heading-main, .radar .section-scale { color: #0d6269; }
+        .community .section-heading-main, .community .section-scale { color: #a86120; }
+        .section-description { margin-top: 5px; color: #6d7a7a; font-size: 16px; line-height: 1.35; }
+        .section-notes { margin-top: 4px; text-align: left; }
+        .partial-notice { margin: 10px 0 14px; padding: 8px 12px; border: 1px solid #e5b86b; background: #fff8e8; color: #8a5a16; font-size: 14px; line-height: 1.4; text-align: center; }
+        .section-note { color: #71807e; font-size: 13px; line-height: 1.4; word-wrap: break-word; }
+        .radar .section-note { color: #4e7778; }
+        .community .section-note { color: #8d6a4a; }
+        .score-matrix {
+          width: 100%; margin-top: 12px; border-collapse: collapse;
+          table-layout: fixed;
         }
-        .ad-hd {
-          padding-bottom: 8px; margin-bottom: 4px;
-          border-bottom: 1px solid #dbeafe;
-          color: #1d4ed8; font-size: 21px; font-weight: 700;
+        .model-column { width: 21%; }
+        .effort-column { width: 13.16%; }
+        .score-matrix th, .score-matrix td { padding: 4px 3px; vertical-align: top; }
+        .model-heading, .effort-heading {
+          padding: 5px 8px 7px !important; color: #697676; border-bottom: 1px solid #d9d0c4;
+          font-size: 16px; font-weight: 700; text-align: left;
         }
-        .ad { width: 100%; border-collapse: collapse; }
-        .ad td { padding: 5px 0; font-size: 20px; }
-        .ad-dot { width: 24px; font-size: 15px; vertical-align: middle; }
-        .ad-txt { color: #1d2939; font-weight: 700; }
-        .ad-ok { color: #10b981; }
-        .ad-warn { color: #f59e0b; }
-        .ad-bad { color: #ef4444; }
-        .ad-none { color: #98a2b3; }
-        .ft-rec { width: 100%; margin-top: 18px; border-collapse: collapse; }
-        .ft-rec td { padding: 5px 0; border-top: 1px solid #eef1f6; font-size: 16px; }
-        .ft-k { width: 150px; color: #667085; font-weight: 700; }
-        .ft-v { color: #344054; }
-        .ft { margin-top: 16px; color: #b0b7c3; font-size: 15px; text-align: center; }
+        .effort-heading { text-align: center; font-family: "Consolas", "JetBrains Mono", "Courier New", monospace; }
+        .model-cell { text-align: left; }
+        .model-box {
+          min-height: 66px; padding: 14px 12px; border: 1px solid #e2d9cd; border-radius: 9px;
+          background: #fffefa; color: #2a393a; font-size: 18px; font-weight: 700;
+          line-height: 1.25; word-wrap: break-word;
+        }
+        .score-box {
+          min-height: 66px; padding: 10px 2px 9px; border: 1px solid #d9e1df;
+          border-radius: 9px; background: #ffffff; text-align: center;
+        }
+        .community .score-box { border-color: #e7d8c6; background: #fffefa; }
+        .score-value {
+          color: #0d6269; font-size: 30px; font-weight: 700; line-height: 1.1;
+          font-family: "Consolas", "JetBrains Mono", "Courier New", monospace;
+        }
+        .community .score-value { color: #a86120; }
+        .score-value.score-missing { color: #9ca5a4; }
+        .score-meta { margin-top: 6px; color: #6e7b7a; font-size: 16px; line-height: 1.15; word-wrap: break-word; }
+        .empty-row { padding: 18px !important; color: #87918f; font-size: 16px; text-align: center; }
+        .footer { margin-top: 22px; padding-top: 16px; border-top: 1px solid #e7ddd1; text-align: center; }
+        .footer-custom { color: #536363; font-size: 16px; line-height: 1.35; word-wrap: break-word; }
+        .footer-note { margin-top: 7px; color: #7c8785; font-size: 16px; line-height: 1.4; word-wrap: break-word; }
     """.trimIndent()
+
+    private fun ByteArray.startsWithPngSignature(): Boolean {
+        val signature = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+        )
+        return size >= signature.size && signature.indices.all { this[it] == signature[it] }
+    }
+
+    private companion object {
+        val EFFORT_ORDER: List<String> = listOf("low", "medium", "high", "xhigh", "max", "ultra")
+    }
 }
 
 /** 图表外观参数。 */
 internal data class CodexRadarChartOptions(
-    val title: String = "Codex 降智检测",
-    val subtitle: String = "CODEX INTELLIGENCE RADAR · 社区真实任务盲测",
-    val adviceTitle: String = "建议",
-    val footer: String = "数据来自 Codex 雷达 codexradar.com · 分数由社区盲测汇总，不代表官方结论",
+    val title: String = "Codex Radar 双评分",
+    val subtitle: String = "雷达分与社区体感分并列展示",
+    val footer: String = "数据来源：Codex Radar 页面抓取",
     val widthPx: Int = 1680
 )

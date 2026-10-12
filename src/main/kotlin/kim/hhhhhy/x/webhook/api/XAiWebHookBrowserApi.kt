@@ -15,6 +15,45 @@ public data class BrowserTextListRequest(
     public val emptySelector: String? = null,
     public val maxItems: Int = 128
 ) {
+    private var containerSelectorValue: String? = null
+    private var containerAttributesValue: List<String> = emptyList()
+    private var itemAttributesValue: List<String> = emptyList()
+
+    public val containerSelector: String?
+        get() = containerSelectorValue
+
+    public val containerAttributes: List<String>
+        get() = containerAttributesValue
+
+    public val itemAttributes: List<String>
+        get() = itemAttributesValue
+
+    /**
+     * 扩展构造器：旧的 7 参数 JVM 构造器保持不变，新增 DOM 属性读取能力不破坏已有调用方。
+     */
+    public constructor(
+        actionId: String,
+        partId: String,
+        itemSelector: String,
+        nameRelativeSelector: String?,
+        statusRelativeSelector: String,
+        emptySelector: String?,
+        maxItems: Int,
+        containerSelector: String?,
+        containerAttributes: List<String>,
+        itemAttributes: List<String>
+    ) : this(
+        actionId = actionId,
+        partId = partId,
+        itemSelector = itemSelector,
+        nameRelativeSelector = nameRelativeSelector,
+        statusRelativeSelector = statusRelativeSelector,
+        emptySelector = emptySelector,
+        maxItems = maxItems
+    ) {
+        configureAttributes(containerSelector, containerAttributes, itemAttributes)
+    }
+
     init {
         requireIdentifier(actionId, "actionId")
         requireIdentifier(partId, "partId")
@@ -25,9 +64,29 @@ public data class BrowserTextListRequest(
         require(maxItems in 1..256) { "maxItems must be between 1 and 256" }
     }
 
+    private fun configureAttributes(
+        containerSelector: String?,
+        containerAttributes: List<String>,
+        itemAttributes: List<String>
+    ): Unit {
+        containerSelector?.let { requireSelector(it, "containerSelector") }
+        requireAttributeNames(containerAttributes, "containerAttributes")
+        requireAttributeNames(itemAttributes, "itemAttributes")
+        containerSelectorValue = containerSelector
+        containerAttributesValue = containerAttributes.toList()
+        itemAttributesValue = itemAttributes.toList()
+    }
+
     private companion object {
         private const val MAX_IDENTIFIER_LENGTH = 100
         private const val MAX_SELECTOR_LENGTH = 2_000
+        private const val MAX_ATTRIBUTE_NAMES = 16
+        private const val MAX_ATTRIBUTE_NAME_LENGTH = 100
+        private val ATTRIBUTE_NAME = Regex("[A-Za-z_:][A-Za-z0-9_.:-]*")
+        private val RELATIVE_XPATH_ESCAPE_AXIS = Regex(
+            "(?:^|/|\\[)(?:ancestor|parent|preceding|following|self)::",
+            RegexOption.IGNORE_CASE
+        )
 
         private fun requireIdentifier(value: String, field: String): Unit {
             require(value.isNotBlank()) { "$field must not be blank" }
@@ -71,10 +130,16 @@ public data class BrowserTextListRequest(
             ) { "$field XPath must be relative to the current item" }
         }
 
-        private val RELATIVE_XPATH_ESCAPE_AXIS = Regex(
-            "(?:^|/|\\[)(?:ancestor|parent|preceding|following|self)::",
-            RegexOption.IGNORE_CASE
-        )
+        private fun requireAttributeNames(values: List<String>, field: String): Unit {
+            require(values.size <= MAX_ATTRIBUTE_NAMES) {
+                "$field must contain at most $MAX_ATTRIBUTE_NAMES entries"
+            }
+            values.forEach { value ->
+                require(value.length <= MAX_ATTRIBUTE_NAME_LENGTH && ATTRIBUTE_NAME.matches(value)) {
+                    "$field contains an invalid HTML attribute name: $value"
+                }
+            }
+        }
     }
 }
 
@@ -86,13 +151,51 @@ public data class BrowserTextListItem(
     public val domId: String?,
     public val dataChannelId: String?,
     public val ariaLabel: String?
-)
+) {
+    private var attributesValue: Map<String, String?> = emptyMap()
+
+    public val attributes: Map<String, String?>
+        get() = attributesValue
+
+    public constructor(
+        index: Int,
+        itemText: String?,
+        nameText: String?,
+        statusText: String?,
+        domId: String?,
+        dataChannelId: String?,
+        ariaLabel: String?,
+        attributes: Map<String, String?>
+    ) : this(index, itemText, nameText, statusText, domId, dataChannelId, ariaLabel) {
+        attributesValue = attributes.toMap()
+    }
+}
 
 public data class BrowserTextListResult(
     public val effectiveUrl: String,
     public val items: List<BrowserTextListItem>,
     public val emptyState: Boolean
-)
+) {
+    private var containerPresentValue: Boolean = true
+    private var containerAttributesValue: Map<String, String?> = emptyMap()
+
+    public val containerPresent: Boolean
+        get() = containerPresentValue
+
+    public val containerAttributes: Map<String, String?>
+        get() = containerAttributesValue
+
+    public constructor(
+        effectiveUrl: String,
+        items: List<BrowserTextListItem>,
+        emptyState: Boolean,
+        containerPresent: Boolean,
+        containerAttributes: Map<String, String?>
+    ) : this(effectiveUrl, items, emptyState) {
+        containerPresentValue = containerPresent
+        containerAttributesValue = containerAttributes.toMap()
+    }
+}
 
 public object XAiWebHookBrowserApi {
     public val API_VERSION: Int = 2

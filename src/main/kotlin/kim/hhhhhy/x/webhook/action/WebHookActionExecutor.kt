@@ -14,11 +14,10 @@ import io.ktor.http.content.TextContent
 import io.ktor.serialization.kotlinx.json.json
 import kim.hhhhhy.x.webhook.XAiWebHook
 import kim.hhhhhy.x.webhook.action.codex.CodexRadarAction
-import kim.hhhhhy.x.webhook.action.codex.CodexRadarAdvisor
 import kim.hhhhhy.x.webhook.action.codex.CodexRadarChart
 import kim.hhhhhy.x.webhook.action.codex.CodexRadarOptionsParser
-import kim.hhhhhy.x.webhook.action.codex.CodexRadarTime
 import kim.hhhhhy.x.webhook.config.ActionConfig
+import kim.hhhhhy.x.webhook.config.WebHookConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ActionResult
 import kim.hhhhhy.x.webhook.model.ExecutionContext
@@ -103,7 +102,9 @@ internal object WebHookActionExecutor {
     }
 
     fun reload(): Unit {
+        CodexRadarAction.stopRefreshScheduler()
         WebPageScreenshotAction.reset()
+        CodexRadarAction.startRefreshScheduler(WebHookConfig.current)
     }
 
     fun close(): Unit {
@@ -206,7 +207,7 @@ internal object WebHookActionExecutor {
     }
 
     /**
-     * 降智检测：拉取 codexradar 数据，生成建议文本与图表图片并发送到会话。
+     * Codex Radar：抓取首页动态 DOM，生成雷达分与社区体感分图片并发送到会话。
      * 目标会话解析复用截图动作的规则（group_id / friend_id / 事件回退）。
      */
     private suspend fun sendCodexRadarReport(action: ActionConfig, context: ExecutionContext): ActionResult {
@@ -223,26 +224,20 @@ internal object WebHookActionExecutor {
             }
 
             val spec = CodexRadarAction.fetchSpec(action) { renderString(it, context) }
-            val snapshot = CodexRadarAction.fetchSnapshot(spec)
-            val advisor = CodexRadarAdvisor(CodexRadarOptionsParser.adviceOptions(action.params))
-            val report = advisor.build(snapshot, CodexRadarTime.now())
-
-            // 建议文本与图表合并为一条消息发送：分两条会在群里割裂成两个气泡，
-            // 且图片先到时文本会失去上下文
+            val snapshot = CodexRadarAction.fetchSnapshot(spec, context)
             val builder = MessageChainBuilder()
             if (sendText) {
                 val header = renderString(action.params["advice_header"], context)
-                    .ifBlank { "建议：" }
-                builder.append(PlainText(report.adviceText(header)))
+                    .ifBlank { "Codex Radar 分数：" }
+                builder.append(PlainText(snapshot.summaryText(header)))
             }
             if (sendChart) {
-                val chart = CodexRadarChart(advisor, CodexRadarOptionsParser.chartOptions(action.params))
+                val chart = CodexRadarChart(CodexRadarOptionsParser.chartOptions(action.params))
                 // HTML 渲染是 CPU 密集型同步操作，放到独立线程避免阻塞事件循环
-                val bytes = withContext(Dispatchers.IO) { HtmlImageRenderer.render(chart.render(report)) }
+                val bytes = withContext(Dispatchers.IO) { HtmlImageRenderer.render(chart.render(snapshot)) }
                 val image = bytes.toExternalResource("png").use { resource ->
                     contact.uploadImage(resource)
                 }
-                // 文本与图片之间补一个换行，避免图片紧贴最后一行文字
                 if (sendText) builder.append(PlainText("\n"))
                 builder.append(image)
             }
@@ -251,9 +246,12 @@ internal object WebHookActionExecutor {
             }
 
             WebHookDebug.log(
-                "[XAiWebHook] [降智检测] 报告发送成功：档位=${snapshot.tiers.size} 预警=${snapshot.alerts.size}"
+                "[XAiWebHook] [Codex Radar] 报告发送成功：雷达分=${snapshot.radarScores.size} 条，" +
+                    "社区体感分=${snapshot.communityScores.size} 条"
             )
             ActionResult(action.type, success = true, message = "sent codex radar report", status = 200)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             XAiWebHook.logger.error("Codex radar report action failed id=${action.id ?: "(inline)"}", error)
             if (failureMessage.isNotBlank()) {

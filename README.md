@@ -139,6 +139,41 @@ actions:
 
 通过 outgoing 触发时，截图会自动发回当前群或好友。通过 incoming 触发时，请求体必须提供 `group_id` 或 `friend_id`，且不能同时提供两者。
 
+## Codex Radar 分数报告
+
+默认配置保留 `send_codex_radar_report` 动作及“降智检测”路由触发方式，但数据源已改为通过 Playwright 访问 `https://codexradar.com/`，读取页面中的“雷达分”和“社区体感分” DOM 区块，并在同一张 PNG 中展示两类分数。
+
+首次启用前确认浏览器配置包含：
+
+```yaml
+browser:
+  enabled: true
+  allowed_hosts:
+    - "codexradar.com"
+
+actions:
+  codex-degradation-report:
+    type: "send_codex_radar_report"
+    page_url: "https://codexradar.com/"
+    timeout_ms: 60000
+    max_wait_ms: 120000
+    poll_interval_ms: 1000
+    stable_polls: 2
+    wait_until: "domcontentloaded"
+    cache:
+      enabled: true
+      file: "codex-radar-cache.json"
+      ttl_ms: 900000
+      refresh_enabled: true
+      refresh_interval_ms: 900000
+    send_text: true
+    send_chart: true
+```
+
+WebHook 服务启动完成后，会对启用缓存的 Codex action 异步预热一次页面数据，只写入缓存，不向群或好友发送消息；`refresh_enabled` 只控制后续定时刷新。无缓存首次请求会在同一个浏览器页面中持续轮询两个区块，最多等待 120 秒；超时后会忽略 `—`、`暂无`、pending 等未完成条目，只要两类仍各有有效分数就生成部分快照、写入缓存并发送带“部分数据”提示的文本/图片。若任一分区完全没有有效分数，才返回失败。命中未过期缓存会立即展示；过期缓存仍先展示，后台刷新失败或超时只记录诊断，不覆盖旧缓存。日志中的 `total/valid/placeholder/pending/final_missing/stable_counts` 可区分页面未完成与源站确实没有样本。
+
+旧版 `efficiency_url`、`insights_url`、IQ 降智判定、预警/推荐和 advice/labels 配置已删除；动作类型、现有 route/action 引用、群/好友目标参数以及 pending/failure、send_text/send_chart 调用方式保持不变。页面结构变化、动态内容超时、分数缺失或越界时会返回明确错误并发送配置中的脱敏失败提示。旧自定义 action 未配置 `cache` 区块时仍走无缓存实时抓取路径。
+
 ## Incoming 示例
 
 ```yaml
@@ -225,6 +260,7 @@ outgoing:
 | `send_friend_message` | 发送好友消息 |
 | `http_request` | 发起 HTTP 请求 |
 | `send_webpage_screenshot` | 使用 Playwright 截图并发送图片 |
+| `send_codex_radar_report` | 读取 Codex Radar 页面并合成雷达分/社区体感分图片 |
 | `query_model_plaza_models` | 匹配所有包含关键词的分组，并分别列出各分组模型 |
 | `query_model_plaza_groups` | 匹配所有包含关键词的模型，并分别列出各模型分组 |
 | `reply` | 构造 Incoming HTTP 响应 |

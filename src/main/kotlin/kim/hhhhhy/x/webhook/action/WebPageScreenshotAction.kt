@@ -75,6 +75,12 @@ internal object WebPageScreenshotAction {
     private const val DEFAULT_SCREENSHOT_RETRY_DELAY_MILLIS = 1_000L
     private const val MAX_SCREENSHOT_RETRY_DELAY_MILLIS = 60_000L
     private const val MAX_BROWSER_QUEUE_SIZE = 32
+    private const val MIN_TEXT_QUERY_WAIT_MILLIS = 1_000L
+    private const val MAX_TEXT_QUERY_WAIT_MILLIS = 120_000L
+    private const val MIN_TEXT_QUERY_POLL_MILLIS = 200L
+    private const val MAX_TEXT_QUERY_POLL_MILLIS = 10_000L
+    private const val MIN_TEXT_QUERY_STABLE_POLLS = 1
+    private const val MAX_TEXT_QUERY_STABLE_POLLS = 5
     private const val AUTH_RESPONSE_POLL_MILLIS = 250L
     private const val PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT = "PW_TEST_SCREENSHOT_NO_FONTS_READY"
     private val NAVIGATION_WAIT_UNTIL = setOf("commit", "domcontentloaded", "load", "networkidle")
@@ -158,6 +164,95 @@ internal object WebPageScreenshotAction {
                 "browser screenshot part not found: ${request.partId}"
             }
             worker().queryTextList(browserConfig, spec, request, environment, statusAttribute).also {
+                if (querySequence.get() == sequence) lastQueryError = null
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (querySequence.get() == sequence) {
+                lastQueryError = error.message?.take(500) ?: error::class.simpleName
+            }
+            throw error
+        }
+    }
+
+    internal suspend fun queryTextLists(
+        action: ActionConfig,
+        context: ExecutionContext,
+        requests: List<BrowserTextListRequest>,
+        environment: Map<String, String> = System.getenv(),
+        statusAttribute: String? = null
+    ): List<BrowserTextListResult> {
+        require(requests.isNotEmpty()) { "browser text query requests must not be empty" }
+        val sequence = querySequence.incrementAndGet()
+        return try {
+            val browserConfig = context.config.browser
+            check(browserConfig.enabled) { "browser actions are disabled" }
+            val spec = parseSpec(action, context)
+            requests.forEach { request ->
+                require(spec.screenshotParts.any { part -> part.id == request.partId }) {
+                    "browser screenshot part not found: ${request.partId}"
+                }
+            }
+            worker().queryTextLists(browserConfig, spec, requests, environment, statusAttribute).also {
+                if (querySequence.get() == sequence) lastQueryError = null
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (querySequence.get() == sequence) {
+                lastQueryError = error.message?.take(500) ?: error::class.simpleName
+            }
+            throw error
+        }
+    }
+
+    /**
+     * 在同一个 Page 上持续读取多个列表，直到 readiness 连续满足 stablePolls 次。
+     * 该入口仅供插件内部使用；公开浏览器 API 仍保持一次性 queryTextList 行为。
+     */
+    internal suspend fun queryTextListsUntil(
+        action: ActionConfig,
+        context: ExecutionContext,
+        requests: List<BrowserTextListRequest>,
+        maxWaitMillis: Long,
+        pollIntervalMillis: Long,
+        stablePolls: Int,
+        environment: Map<String, String> = System.getenv(),
+        statusAttribute: String? = null,
+        readiness: (current: List<BrowserTextListResult>, previous: List<BrowserTextListResult>?) -> Boolean
+    ): List<BrowserTextListResult> {
+        require(requests.isNotEmpty()) { "browser text query requests must not be empty" }
+        val boundedWaitMillis = maxWaitMillis.coerceIn(MIN_TEXT_QUERY_WAIT_MILLIS, MAX_TEXT_QUERY_WAIT_MILLIS)
+        val boundedPollIntervalMillis = pollIntervalMillis.coerceIn(
+            MIN_TEXT_QUERY_POLL_MILLIS,
+            MAX_TEXT_QUERY_POLL_MILLIS
+        )
+        val boundedStablePolls = stablePolls.coerceIn(
+            MIN_TEXT_QUERY_STABLE_POLLS,
+            MAX_TEXT_QUERY_STABLE_POLLS
+        )
+        val sequence = querySequence.incrementAndGet()
+        return try {
+            val browserConfig = context.config.browser
+            check(browserConfig.enabled) { "browser actions are disabled" }
+            val spec = parseSpec(action, context)
+            requests.forEach { request ->
+                require(spec.screenshotParts.any { part -> part.id == request.partId }) {
+                    "browser screenshot part not found: ${request.partId}"
+                }
+            }
+            worker().queryTextListsUntil(
+                config = browserConfig,
+                spec = spec,
+                requests = requests,
+                maxWaitMillis = boundedWaitMillis,
+                pollIntervalMillis = boundedPollIntervalMillis,
+                stablePolls = boundedStablePolls,
+                environment = environment,
+                statusAttribute = statusAttribute,
+                readiness = readiness
+            ).also {
                 if (querySequence.get() == sequence) lastQueryError = null
             }
         } catch (error: CancellationException) {
@@ -1414,7 +1509,45 @@ internal object WebPageScreenshotAction {
             environment: Map<String, String>,
             statusAttribute: String?
         ): BrowserTextListResult {
-            return submit { queryTextListOnWorker(config, spec, request, environment, statusAttribute) }
+            return queryTextLists(config, spec, listOf(request), environment, statusAttribute).single()
+        }
+
+        suspend fun queryTextLists(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            requests: List<BrowserTextListRequest>,
+            environment: Map<String, String>,
+            statusAttribute: String?
+        ): List<BrowserTextListResult> {
+            require(requests.isNotEmpty()) { "browser text query requests must not be empty" }
+            return submit { queryTextListsOnWorker(config, spec, requests, environment, statusAttribute) }
+        }
+
+        suspend fun queryTextListsUntil(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            requests: List<BrowserTextListRequest>,
+            maxWaitMillis: Long,
+            pollIntervalMillis: Long,
+            stablePolls: Int,
+            environment: Map<String, String>,
+            statusAttribute: String?,
+            readiness: (current: List<BrowserTextListResult>, previous: List<BrowserTextListResult>?) -> Boolean
+        ): List<BrowserTextListResult> {
+            require(requests.isNotEmpty()) { "browser text query requests must not be empty" }
+            return submit {
+                queryTextListsUntilOnWorker(
+                    config = config,
+                    spec = spec,
+                    requests = requests,
+                    maxWaitMillis = maxWaitMillis,
+                    pollIntervalMillis = pollIntervalMillis,
+                    stablePolls = stablePolls,
+                    environment = environment,
+                    statusAttribute = statusAttribute,
+                    readiness = readiness
+                )
+            }
         }
 
         fun close(): Unit {
@@ -1465,13 +1598,17 @@ internal object WebPageScreenshotAction {
             throw allBaseUrlsFailed(failures)
         }
 
-        private fun queryTextListOnWorker(
+        private fun queryTextListsOnWorker(
             config: BrowserConfig,
             spec: WebPageScreenshotSpec,
-            request: BrowserTextListRequest,
+            requests: List<BrowserTextListRequest>,
             environment: Map<String, String>,
             statusAttribute: String?
-        ): BrowserTextListResult {
+        ): List<BrowserTextListResult> {
+            val partIds = requests.map { request -> request.partId }.distinct()
+            require(partIds.size == 1) {
+                "batched browser text queries must target the same screenshot part"
+            }
             val activeBrowser = ensureBrowser(config)
             val failures = mutableListOf<Pair<String, Throwable>>()
             orderedBaseUrlCandidates(spec).forEach { baseUrl ->
@@ -1480,11 +1617,11 @@ internal object WebPageScreenshotAction {
                     sessionKey = effectiveSessionKey(activeSpec.sessionKey, baseUrl)
                 )
                 try {
-                    return queryTextListWithResolvedSpec(
+                    return queryTextListsWithResolvedSpec(
                         activeBrowser = activeBrowser,
                         config = config,
                         spec = effectiveSpec,
-                        request = request,
+                        requests = requests,
                         environment = environment,
                         statusAttribute = statusAttribute
                     )
@@ -1494,6 +1631,54 @@ internal object WebPageScreenshotAction {
                     rememberBaseUrlFailure(spec, baseUrl)
                     WebHookDebug.log(
                         "[XAiWebHook] [browser] base_url $baseUrl failed during DOM query; " +
+                            "trying next candidate: ${summarizeError(error)}"
+                    )
+                }
+            }
+            throw allBaseUrlsFailed(failures)
+        }
+
+        private fun queryTextListsUntilOnWorker(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            requests: List<BrowserTextListRequest>,
+            maxWaitMillis: Long,
+            pollIntervalMillis: Long,
+            stablePolls: Int,
+            environment: Map<String, String>,
+            statusAttribute: String?,
+            readiness: (current: List<BrowserTextListResult>, previous: List<BrowserTextListResult>?) -> Boolean
+        ): List<BrowserTextListResult> {
+            val partIds = requests.map { request -> request.partId }.distinct()
+            require(partIds.size == 1) {
+                "polled browser text queries must target the same screenshot part"
+            }
+            val activeBrowser = ensureBrowser(config)
+            val failures = mutableListOf<Pair<String, Throwable>>()
+            orderedBaseUrlCandidates(spec).forEach { baseUrl ->
+                val activeSpec = spec.withBaseUrl(baseUrl)
+                val effectiveSpec = activeSpec.copy(
+                    sessionKey = effectiveSessionKey(activeSpec.sessionKey, baseUrl)
+                )
+                try {
+                    return queryTextListsUntilWithResolvedSpec(
+                        activeBrowser = activeBrowser,
+                        config = config,
+                        spec = effectiveSpec,
+                        requests = requests,
+                        maxWaitMillis = maxWaitMillis,
+                        pollIntervalMillis = pollIntervalMillis,
+                        stablePolls = stablePolls,
+                        environment = environment,
+                        statusAttribute = statusAttribute,
+                        readiness = readiness
+                    )
+                } catch (error: Throwable) {
+                    if (baseUrl == null || !isBaseUrlNavigationFailure(error)) throw error
+                    failures += baseUrl to error
+                    rememberBaseUrlFailure(spec, baseUrl)
+                    WebHookDebug.log(
+                        "[XAiWebHook] [browser] base_url $baseUrl failed during polled DOM query; " +
                             "trying next candidate: ${summarizeError(error)}"
                     )
                 }
@@ -1548,15 +1733,15 @@ internal object WebPageScreenshotAction {
             }
         }
 
-        private fun queryTextListWithResolvedSpec(
+        private fun queryTextListsWithResolvedSpec(
             activeBrowser: Browser,
             config: BrowserConfig,
             spec: WebPageScreenshotSpec,
-            request: BrowserTextListRequest,
+            requests: List<BrowserTextListRequest>,
             environment: Map<String, String>,
             statusAttribute: String?
-        ): BrowserTextListResult {
-            val part = spec.screenshotParts.first { item -> item.id == request.partId }
+        ): List<BrowserTextListResult> {
+            val part = spec.screenshotParts.first { item -> item.id == requests.first().partId }
             return withResolvedSession(activeBrowser, config, spec, environment) { session ->
                 val page = session.context.newPage()
                 val authSignal = BrowserAuthRejectionSignal(page, session.auth)
@@ -1567,9 +1752,85 @@ internal object WebPageScreenshotAction {
                         }
                         authSignal.throwIfRejected(page)
                         waitBeforeScreenshot(page, part, authSignal)
-                        waitForTextQueryReady(page, part, request, authSignal)
-                        readTextList(page, request, statusAttribute)
+                        requests.map { request ->
+                            waitForTextQueryReady(page, part, request, authSignal)
+                            readTextList(page, request, statusAttribute)
+                        }
                     } catch (error: BrowserAccessTokenRejectedException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        authSignal.throwIfRejected(page)
+                        throw textQueryError(page, part, error)
+                    }
+                } finally {
+                    authSignal.close()
+                    runCatching { page.close() }
+                }
+            }
+        }
+
+        private fun queryTextListsUntilWithResolvedSpec(
+            activeBrowser: Browser,
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            requests: List<BrowserTextListRequest>,
+            maxWaitMillis: Long,
+            pollIntervalMillis: Long,
+            stablePolls: Int,
+            environment: Map<String, String>,
+            statusAttribute: String?,
+            readiness: (current: List<BrowserTextListResult>, previous: List<BrowserTextListResult>?) -> Boolean
+        ): List<BrowserTextListResult> {
+            val part = spec.screenshotParts.first { item -> item.id == requests.first().partId }
+            return withResolvedSession(activeBrowser, config, spec, environment) session@{ session ->
+                val page = session.context.newPage()
+                val authSignal = BrowserAuthRejectionSignal(page, session.auth)
+                var previous: List<BrowserTextListResult>? = null
+                var lastResults = emptyList<BrowserTextListResult>()
+                try {
+                    try {
+                        part.steps.forEach { step ->
+                            runStep(page, step, config, environment, authSignal)
+                        }
+                        authSignal.throwIfRejected(page)
+                        waitBeforeScreenshot(page, part, authSignal)
+                        val deadline = System.nanoTime() + maxWaitMillis * 1_000_000L
+                        var stableCount = 0
+                        var completed: List<BrowserTextListResult>? = null
+                        while (completed == null) {
+                            authSignal.throwIfRejected(page)
+                            val current = requests.map { request ->
+                                readTextList(
+                                    page = page,
+                                    request = request,
+                                    statusAttribute = statusAttribute,
+                                    allowMissingItems = true
+                                )
+                            }
+                            lastResults = current
+                            val ready = readiness(current, previous)
+                            stableCount = if (ready) stableCount + 1 else 0
+                            if (stableCount >= stablePolls) {
+                                completed = current
+                                break
+                            }
+                            previous = current
+                            val remainingNanos = deadline - System.nanoTime()
+                            if (remainingNanos <= 0L) {
+                                throw BrowserTextQueryTimeoutException(
+                                    message = "browser text query readiness timed out after ${maxWaitMillis}ms",
+                                    lastResults = lastResults
+                                )
+                            }
+                            val waitMillis = (remainingNanos / 1_000_000L)
+                                .coerceAtMost(pollIntervalMillis)
+                                .coerceAtLeast(1L)
+                            page.waitForTimeout(waitMillis.toDouble())
+                        }
+                        completed ?: error("browser text query completed without results")
+                    } catch (error: BrowserAccessTokenRejectedException) {
+                        throw error
+                    } catch (error: BrowserTextQueryTimeoutException) {
                         throw error
                     } catch (error: Throwable) {
                         authSignal.throwIfRejected(page)
@@ -1783,8 +2044,18 @@ internal object WebPageScreenshotAction {
         private fun readTextList(
             page: Page,
             request: BrowserTextListRequest,
-            statusAttribute: String?
+            statusAttribute: String?,
+            allowMissingItems: Boolean = false
         ): BrowserTextListResult {
+            val container = request.containerSelector?.let { selector ->
+                page.locator(normalizeSelector(selector))
+            }
+            val containerPresent = container == null || container.count() > 0
+            val containerAttributes = if (container == null || !containerPresent) {
+                emptyMap()
+            } else {
+                readAttributes(container.first(), request.containerAttributes)
+            }
             val items = page.locator(normalizeSelector(request.itemSelector))
             val count = items.count()
             require(count <= request.maxItems) {
@@ -1795,36 +2066,47 @@ internal object WebPageScreenshotAction {
                     val empty = page.locator(normalizeSelector(selector))
                     empty.count() > 0 && runCatching { empty.first().isVisible() }.getOrDefault(false)
                 } ?: false
-                require(emptyState) { "browser text query matched no items and no visible empty state" }
+                if (!allowMissingItems) {
+                    require(emptyState) { "browser text query matched no items and no visible empty state" }
+                }
                 return BrowserTextListResult(
-                    effectiveUrl = page.url(),
-                    items = emptyList(),
-                    emptyState = true
+                    page.url(),
+                    emptyList(),
+                    emptyState,
+                    containerPresent,
+                    containerAttributes
                 )
             }
 
             return BrowserTextListResult(
-                effectiveUrl = page.url(),
-                items = (0 until count).map { index ->
+                page.url(),
+                (0 until count).map { index ->
                     val item = items.nth(index)
                     BrowserTextListItem(
-                        index = index + 1,
-                        itemText = readInnerText(item),
-                        nameText = request.nameRelativeSelector?.let { selector ->
+                        index + 1,
+                        readInnerText(item),
+                        request.nameRelativeSelector?.let { selector ->
                             readRelativeInnerText(item, selector)
                         },
-                        statusText = readRelativeValue(
+                        readRelativeValue(
                             item = item,
                             selector = request.statusRelativeSelector,
                             attribute = statusAttribute
                         ),
-                        domId = readAttribute(item, "id"),
-                        dataChannelId = readAttribute(item, "data-channel-id"),
-                        ariaLabel = readAttribute(item, "aria-label")
+                        readAttribute(item, "id"),
+                        readAttribute(item, "data-channel-id"),
+                        readAttribute(item, "aria-label"),
+                        readAttributes(item, request.itemAttributes)
                     )
                 },
-                emptyState = false
+                false,
+                containerPresent,
+                containerAttributes
             )
+        }
+
+        private fun readAttributes(locator: Locator, names: List<String>): Map<String, String?> {
+            return names.associateWith { name -> readAttribute(locator, name) }
         }
 
         private fun readRelativeInnerText(item: Locator, selector: String): String? {
@@ -2796,6 +3078,11 @@ internal object WebPageScreenshotAction {
         }
     }
 }
+
+internal class BrowserTextQueryTimeoutException(
+    message: String,
+    val lastResults: List<BrowserTextListResult>
+) : IllegalStateException(message)
 
 internal class BrowserBaseUrlCursor {
     private val cursors = mutableMapOf<String, Int>()
