@@ -97,7 +97,7 @@ internal class WebPageScreenshotActionTest {
         val pageCalls = AtomicInteger()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->
-            pageCalls.incrementAndGet()
+            if (exchange.requestURI.path == "/") pageCalls.incrementAndGet()
             exchange.respondHtml(
                 """
                 <!doctype html>
