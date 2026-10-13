@@ -33,6 +33,13 @@ internal class QueryConfigTest {
         assertNotNull(config.modelPlaza.queries.models.responseFormat.successTemplate)
         assertNotNull(config.modelPlaza.queries.groups.responseFormat.successTemplate)
         assertTrue(config.modelPlaza.queries.models.keywordExtraction.requirePrefixMatch)
+        val outgoingMap = root["outgoing"].asMap()
+        val routes = outgoingMap["routes"] as List<*>
+        val requestRoute = routes.map { it.asMap() }
+            .first { it["id"] == "model-plaza-query-requests" }
+        assertEquals(listOf("请求"), requestRoute["message"].asMap()["starts_with"])
+        val requestAction = (requestRoute["actions"] as List<*>).single().asMap()
+        assertEquals("query_model_plaza_requests", requestAction["type"])
     }
 
     @Test

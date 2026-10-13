@@ -125,6 +125,7 @@ internal object WebHookActionExecutor {
             "send_codex_radar_report" -> sendCodexRadarReport(action, context)
             "query_model_plaza_models" -> ModelPlazaQueryAction.queryModels(action, context)
             "query_model_plaza_groups" -> ModelPlazaQueryAction.queryGroups(action, context)
+            "query_model_plaza_requests" -> ModelPlazaRequestAction.query(action, context)
             "polymarket_search" -> PolymarketSearchAction.search(action, context)
             "http_request" -> httpRequest(action, context)
             "execute_command" -> executeCommand(action, context)

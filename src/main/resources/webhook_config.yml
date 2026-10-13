@@ -599,6 +599,66 @@ outgoing:
           # 可选：无结果提示
           empty_message: "未找到包含该关键词的模型"
 
+    # Model Plaza 请求查询：群成员发送"请求 <关键词>"时访问 /model-plaza 页面并返回请求信息
+    # 仅访问 /model-plaza；需要同时启用 browser.enabled、model_plaza.enabled 并完成 auth 登录。
+    # 结果不超过 3 条时发送普通图文，超过 3 条时合并为转发消息；缺失字段显示“暂无数据”。
+    - id: "model-plaza-query-requests"
+      # 默认关闭；启用前需同时设置 browser.enabled: true、model_plaza.enabled: true 并完成 auth 登录
+      enabled: false
+      events: ["group_message"]
+      # 使用占位群号，生产环境替换为允许触发查询的群；留空表示不限制群
+      groups: [123456789]
+      message:
+        # 消息以“请求”开头时触发，例如：“请求 gpt-4”
+        starts_with: ["请求"]
+      single_flight:
+        enabled: true
+        key: "model-plaza-request"
+        notify: true
+        message: "请求查询正在执行，请稍候..."
+      cooldown:
+        enabled: true
+        personal_ms: 10000
+        administrator_ms: 5000
+        global_ms: 3000
+        notify: true
+        message: "请求查询冷却中，请在 ${cooldown.remainingSeconds} 秒后重试。"
+      actions:
+        # 仅访问 /model-plaza；动作从 outgoing event 自动选择群/好友，无需额外目标参数
+        # 结果 <=3 条为普通图文，>3 条为合并转发，缺失字段显示“暂无数据”
+        - type: "query_model_plaza_requests"
+          # 关键词前缀，默认 ["请求", "request"]；按顺序命中一个即移除，未命中时不查询
+          # prefixes: ["请求", "request"]
+          # 可选关键词正则，默认不使用；与 queries.groups 的正则互不影响，capture_group 默认 1，范围 0-20
+          # keyword_regex: "^(\\S+)$"
+          # 可选页面覆盖；默认 model_plaza.base_url，必须与其同源且路径为 /model-plaza，不能带查询参数
+          # page_url: "https://hk.geek2api.com/model-plaza"
+          # 浏览器会话缓存键，默认 model-plaza-request；token 变化时会自动重建会话
+          # session_key: "model-plaza-request"
+          # 搜索框选择器，默认模型广场搜索框 XPath，找不到时回退到 main 内第一个文本输入框；CSS 或 XPath
+          # search_selector: "input[placeholder*='搜索']"
+          # 模型卡片选择器，默认模型列表 XPath 并兼容带 h3 的 div[role=button] 卡片；需匹配全部卡片
+          # model_card_selector: "[data-request-card]"
+          # 卡片内模型名称选择器，默认相对 XPath .//h3；CSS 或相对 XPath
+          # model_name_selector: "[data-model-name]"
+          # 卡片内吞吐/延迟所在行，默认相对 XPath ./div[2]/div[2]/div；CSS 或相对 XPath
+          # performance_selector: "[data-performance]"
+          # 卡片内成功率图表，默认依次尝试 aria-label 以“近 5 个时段成功率”开头、包含“成功率”，
+          # 最后取指标行内的 role=img 图表（兼容英文界面）；配置后优先使用该值
+          # sparkline_selector: "[aria-label^='近 5 个时段成功率']"
+          # 搜索后等待指标渲染的上限（毫秒），默认 5000，范围 0-120000；先稳定 500 毫秒，
+          # 任一卡片出现吞吐即提前继续；全部无数据时等满上限后按字段输出“暂无数据”
+          # search_wait_ms: 5000
+          # 导航、搜索框和卡片等待的超时（毫秒），默认 model_plaza.timeout_ms，范围 100-300000；
+          # 单张图表截图最多等待 10000 毫秒，超时只让该模型显示“图片：暂无数据”
+          # timeout_ms: 30000
+          # 开始查询提示，默认“正在查询模型请求记录，请稍候...”；设为空字符串可关闭
+          pending_message: "正在查询模型请求记录，请稍候..."
+          # 整体查询失败提示，默认“查询失败，请稍后重试”；留空不发送
+          failure_message: "查询失败，请稍后重试"
+          # 无匹配模型提示，支持 ${query}；字段缺失时仍按字段显示“暂无数据”
+          empty_message: "未找到包含“${query}”的模型"
+
     # Polymarket 搜索：群成员发送"poly <关键词>"时搜索并返回市场信息；也支持
     # "poly https://polymarket.com/zh/event/<slug>"，此时按事件页返回全部开放子市场摘要。
     - id: "polymarket-search-command"
