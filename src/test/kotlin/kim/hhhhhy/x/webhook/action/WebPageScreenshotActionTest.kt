@@ -215,6 +215,88 @@ internal class WebPageScreenshotActionTest {
     }
 
     @Test
+    fun modelPlazaCollectorShouldReadMultipleCardsAndCaptureEachSparkline(): Unit {
+        if (System.getenv("XAI_WEBHOOK_BROWSER_IT") != "true") return
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/model-plaza") { exchange ->
+            exchange.respondHtml(
+                """
+                <!doctype html>
+                <html><body>
+                  <input id="search" type="search">
+                  <div class="card" style="display:block;width:180px;height:120px">
+                    <h3>gpt-4</h3>
+                    <div class="performance">81.4 tps 19500ms</div>
+                    <div aria-label="近 5 个时段成功率，最低 0.0%" style="display:block;width:100px;height:20px;background:#10b981"></div>
+                  </div>
+                  <div class="card" style="display:block;width:180px;height:120px">
+                    <h3>gpt-4-turbo</h3>
+                    <div class="performance">50.0 tps 1.25s</div>
+                    <div aria-label="近 5 个时段成功率，最低 80.0%" style="display:block;width:100px;height:20px;background:#3b82f6"></div>
+                  </div>
+                </body></html>
+                """.trimIndent()
+            )
+        }
+        server.start()
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+        val browserConfig = BrowserConfig.safeDefault().copy(
+            enabled = true,
+            channel = "msedge",
+            timeoutMillis = 5_000L,
+            allowedHosts = listOf("127.0.0.1")
+        )
+        val executionContext = ExecutionContext(config.copy(browser = browserConfig))
+        val action = ActionConfig(
+            id = "model-plaza-fixture",
+            type = "send_webpage_screenshot",
+            enabled = true,
+            params = mapOf(
+                "search_pattern" to "gpt",
+                "search_selector" to "#search",
+                "model_card_selector" to ".card",
+                "model_name_selector" to "h3",
+                "performance_selector" to ".performance",
+                "sparkline_selector" to "[aria-label^=\"近 5 个时段成功率\"]",
+                "screenshot" to mapOf(
+                    "parts" to listOf(
+                        mapOf(
+                            "id" to "main",
+                            "url" to "$baseUrl/model-plaza",
+                            "wait_until" to "domcontentloaded",
+                            "selector" to "body",
+                            "timeout_ms" to 5_000
+                        )
+                    )
+                )
+            )
+        )
+
+        WebPageScreenshotAction.reset()
+        WebPageScreenshotAction.open()
+        try {
+            val results = runBlocking {
+                WebPageScreenshotAction.collectModelPlazaRequests(
+                    action = action,
+                    context = executionContext,
+                    modelNames = listOf("gpt-4", "gpt-4-turbo")
+                )
+            }
+            assertEquals(2, results.size)
+            assertEquals("81.4 tps", results[0].throughputText)
+            assertEquals("19500ms", results[0].latencyText)
+            assertTrue(results[0].screenshot?.hasPngHeader() == true)
+            assertEquals("50.0 tps", results[1].throughputText)
+            assertEquals("1.25s", results[1].latencyText)
+            assertTrue(results[1].screenshot?.hasPngHeader() == true)
+        } finally {
+            WebPageScreenshotAction.reset()
+            server.stop(0)
+        }
+    }
+
+    @Test
     fun defaultYamlContainsReusableScreenshotAction(): Unit {
         val root = WebPageScreenshotActionTest::class.java.getResourceAsStream("/webhook_config.yml").use { input ->
             requireNotNull(input)

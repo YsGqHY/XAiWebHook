@@ -58,6 +58,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Consumer
 import javax.imageio.ImageIO
 
@@ -83,6 +84,32 @@ internal object WebPageScreenshotAction {
     private const val MAX_TEXT_QUERY_STABLE_POLLS = 5
     private const val AUTH_RESPONSE_POLL_MILLIS = 250L
     private const val PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT = "PW_TEST_SCREENSHOT_NO_FONTS_READY"
+    // 默认选择器先使用页面实测路径，再用语义更稳的路径兜底；XPath 并集会按文档顺序去重。
+    private const val DEFAULT_MODEL_PLAZA_SEARCH_SELECTOR =
+        "xpath=(//*[@id=\"app\"]/div[2]/div[2]/main/div/div[1]/div[1]/div/input | " +
+            "//*[@id=\"app\"]//main//input[@type=\"text\" or @type=\"search\"])[1]"
+    private const val DEFAULT_MODEL_PLAZA_CARD_SELECTOR =
+        "xpath=//*[@id=\"app\"]/div[2]/div[2]/main/div/div[3]/div | " +
+            "//*[@id=\"app\"]//main//div[@role=\"button\"][.//h3]"
+    private const val DEFAULT_MODEL_PLAZA_NAME_SELECTOR = "xpath=.//h3"
+    private const val DEFAULT_MODEL_PLAZA_PERFORMANCE_SELECTOR = "xpath=./div[2]/div[2]/div"
+    private const val DEFAULT_MODEL_PLAZA_SEARCH_WAIT_MILLIS = 5_000L
+    private const val MODEL_PLAZA_SEARCH_SETTLE_MILLIS = 500L
+    private const val MODEL_PLAZA_METRICS_POLL_MILLIS = 250L
+    // 该文本被 ModelPlazaRequestAction.isBrowserAuthFailure 识别，用于触发一次 token 刷新重试。
+    private const val MODEL_PLAZA_LOGIN_REDIRECT_MESSAGE =
+        "browser access token was rejected: Model Plaza redirected to the login page instead of /model-plaza"
+    private const val MODEL_PLAZA_OUTSIDE_MESSAGE = "Model Plaza page navigated outside /model-plaza"
+    // 成功率图表的 aria-label 中“时段数”和“最低值”都会变化，因此按从精确到宽松的顺序查找。
+    private val MODEL_PLAZA_SPARKLINE_SELECTORS = listOf(
+        "[role=\"img\"][aria-label^=\"近 5 个时段成功率\"]",
+        "[role=\"img\"][aria-label*=\"成功率\"]",
+        "[aria-label*=\"成功率\"]"
+    )
+    private val MODEL_PLAZA_THROUGHPUT_PATTERN =
+        Regex("(?i)\\b\\d+(?:[.,]\\d+)?\\s*(?:tokens/s|tok/s|t/s|tps)\\b")
+    private val MODEL_PLAZA_LATENCY_PATTERN =
+        Regex("(?i)\\b\\d+(?:[.,]\\d+)?\\s*(?:ms|s)\\b")
     private val NAVIGATION_WAIT_UNTIL = setOf("commit", "domcontentloaded", "load", "networkidle")
     private val SCREENSHOT_HORIZONTAL_ALIGNMENTS = setOf("left", "center", "right")
     private val workerLock = Any()
@@ -100,6 +127,16 @@ internal object WebPageScreenshotAction {
     @Volatile
     var lastQueryError: String? = null
         private set
+
+    private data class ModelPlazaCollectorOptions(
+        val searchSelector: String?,
+        val searchPattern: String?,
+        val searchWaitMillis: Long,
+        val modelCardSelector: String,
+        val modelNameSelector: String,
+        val performanceSelector: String,
+        val sparklineSelector: String?
+    )
 
     suspend fun capture(
         action: ActionConfig,
@@ -296,6 +333,124 @@ internal object WebPageScreenshotAction {
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" to "1",
         PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT to "1"
     )
+
+    /**
+     * 将页面模型卡一对一分配给 API 返回的模型名，返回值下标对应卡片、元素为模型下标。
+     * 依次尝试：卡片标题精确匹配 → 卡片内单独一行的原始模型名精确匹配 → 完整词边界的最长模糊匹配。
+     * 每张卡、每个模型都只会被使用一次，避免 gpt-4 与 gpt-4-turbo 等重叠名称互相借用数据。
+     */
+    internal fun assignModelPlazaCards(
+        modelNames: List<String>,
+        cardNames: List<String?>,
+        cardTexts: List<String>
+    ): List<Int?> {
+        require(cardNames.size == cardTexts.size) { "Model Plaza card metadata sizes must match" }
+        val normalizedNames = modelNames.map { modelName -> modelName.trim().lowercase(Locale.ROOT) }
+        val normalizedCardNames = cardNames.map { name -> name?.trim()?.lowercase(Locale.ROOT)?.ifBlank { null } }
+        val assignments = arrayOfNulls<Int>(cardNames.size)
+        val assignedModelIndexes = mutableSetOf<Int>()
+
+        fun assign(cardIndex: Int, modelIndex: Int?): Unit {
+            if (modelIndex == null) return
+            assignments[cardIndex] = modelIndex
+            assignedModelIndexes += modelIndex
+        }
+
+        fun unassignedModels(): List<Int> = normalizedNames.indices.filter { it !in assignedModelIndexes }
+
+        normalizedCardNames.forEachIndexed { cardIndex, displayName ->
+            if (displayName == null) return@forEachIndexed
+            assign(cardIndex, unassignedModels().firstOrNull { normalizedNames[it] == displayName })
+        }
+        cardTexts.forEachIndexed { cardIndex, text ->
+            if (assignments[cardIndex] != null) return@forEachIndexed
+            val lines = text.lineSequence()
+                .map { line -> line.trim().lowercase(Locale.ROOT) }
+                .filter { line -> line.isNotEmpty() }
+                .toSet()
+            assign(cardIndex, unassignedModels().firstOrNull { normalizedNames[it] in lines })
+        }
+        cardTexts.forEachIndexed { cardIndex, text ->
+            if (assignments[cardIndex] != null) return@forEachIndexed
+            val source = normalizedCardNames[cardIndex] ?: text.lowercase(Locale.ROOT)
+            assign(
+                cardIndex,
+                unassignedModels()
+                    .filter { modelIndex -> containsWholeName(source, normalizedNames[modelIndex]) }
+                    .maxByOrNull { modelIndex -> normalizedNames[modelIndex].length }
+            )
+        }
+        return assignments.toList()
+    }
+
+    private fun containsWholeName(source: String, name: String): Boolean {
+        if (name.isEmpty()) return false
+        var start = source.indexOf(name)
+        while (start >= 0) {
+            val before = source.getOrNull(start - 1)
+            val after = source.getOrNull(start + name.length)
+            if ((before == null || !before.isLetterOrDigit()) && (after == null || !after.isLetterOrDigit())) {
+                return true
+            }
+            start = source.indexOf(name, start + 1)
+        }
+        return false
+    }
+
+    internal suspend fun collectModelPlazaRequests(
+        action: ActionConfig,
+        context: ExecutionContext,
+        modelNames: List<String>,
+        environment: Map<String, String> = System.getenv()
+    ): List<ModelPlazaBrowserResult> {
+        val requestedModels = modelNames
+            .map { modelName -> modelName.trim() }
+            .filter { modelName -> modelName.isNotEmpty() }
+            .distinctBy { modelName -> modelName.lowercase(Locale.ROOT) }
+        require(requestedModels.isNotEmpty()) { "model names must not be empty" }
+        val browserConfig = context.config.browser
+        check(browserConfig.enabled) { "browser actions are disabled" }
+        val spec = parseSpec(action, context)
+        val searchPattern = renderOptionalString(action.params["search_pattern"], context)
+            ?.trim()
+            ?.ifBlank { null }
+        val options = ModelPlazaCollectorOptions(
+            searchSelector = renderOptionalString(action.params["search_selector"], context)
+                ?.trim()
+                ?.ifBlank { null }
+                ?.let(::normalizeSelector)
+                ?: DEFAULT_MODEL_PLAZA_SEARCH_SELECTOR.takeIf { searchPattern != null },
+            searchPattern = searchPattern,
+            searchWaitMillis = renderOptionalLong(action.params["search_wait_ms"], context)
+                ?.coerceIn(0L, MAX_TEXT_QUERY_WAIT_MILLIS)
+                ?: DEFAULT_MODEL_PLAZA_SEARCH_WAIT_MILLIS,
+            modelCardSelector = renderOptionalString(action.params["model_card_selector"], context)
+                ?.trim()
+                ?.ifBlank { null }
+                ?.let(::normalizeSelector)
+                ?: DEFAULT_MODEL_PLAZA_CARD_SELECTOR,
+            modelNameSelector = renderOptionalString(action.params["model_name_selector"], context)
+                ?.trim()
+                ?.ifBlank { null }
+                ?.let(::normalizeSelector)
+                ?: DEFAULT_MODEL_PLAZA_NAME_SELECTOR,
+            performanceSelector = renderOptionalString(action.params["performance_selector"], context)
+                ?.trim()
+                ?.ifBlank { null }
+                ?.let(::normalizeSelector)
+                ?: DEFAULT_MODEL_PLAZA_PERFORMANCE_SELECTOR,
+            sparklineSelector = renderOptionalString(action.params["sparkline_selector"], context)
+                ?.trim()
+                ?.ifBlank { null }
+        )
+        return worker().collectModelPlazaRequests(
+            config = browserConfig,
+            spec = spec,
+            modelNames = requestedModels,
+            options = options,
+            environment = environment
+        )
+    }
 
     internal fun parseSpec(action: ActionConfig, context: ExecutionContext): WebPageScreenshotSpec {
         val baseUrls = parseBaseUrls(action.params["base_urls"], context, context.config.browser.allowedHosts)
@@ -1550,6 +1705,25 @@ internal object WebPageScreenshotAction {
             }
         }
 
+        suspend fun collectModelPlazaRequests(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            modelNames: List<String>,
+            options: ModelPlazaCollectorOptions,
+            environment: Map<String, String>
+        ): List<ModelPlazaBrowserResult> {
+            require(modelNames.isNotEmpty()) { "model names must not be empty" }
+            return submit {
+                collectModelPlazaRequestsOnWorker(
+                    config = config,
+                    spec = spec,
+                    modelNames = modelNames,
+                    options = options,
+                    environment = environment
+                )
+            }
+        }
+
         fun close(): Unit {
             if (!closing.compareAndSet(false, true)) return
             val cancellation = CancellationException("browser worker is closing")
@@ -1684,6 +1858,341 @@ internal object WebPageScreenshotAction {
                 }
             }
             throw allBaseUrlsFailed(failures)
+        }
+
+        private fun collectModelPlazaRequestsOnWorker(
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            modelNames: List<String>,
+            options: ModelPlazaCollectorOptions,
+            environment: Map<String, String>
+        ): List<ModelPlazaBrowserResult> {
+            val activeBrowser = ensureBrowser(config)
+            val failures = mutableListOf<Pair<String, Throwable>>()
+            orderedBaseUrlCandidates(spec).forEach { baseUrl ->
+                val activeSpec = spec.withBaseUrl(baseUrl)
+                val effectiveSpec = activeSpec.copy(
+                    sessionKey = effectiveSessionKey(activeSpec.sessionKey, baseUrl)
+                )
+                try {
+                    return collectModelPlazaRequestsWithResolvedSpec(
+                        activeBrowser = activeBrowser,
+                        config = config,
+                        spec = effectiveSpec,
+                        modelNames = modelNames,
+                        options = options,
+                        environment = environment
+                    )
+                } catch (error: Throwable) {
+                    if (baseUrl == null || !isBaseUrlNavigationFailure(error)) throw error
+                    failures += baseUrl to error
+                    rememberBaseUrlFailure(spec, baseUrl)
+                    WebHookDebug.log(
+                        "[XAiWebHook] [browser] base_url $baseUrl failed during Model Plaza request query; " +
+                            "trying next candidate: ${summarizeError(error)}"
+                    )
+                }
+            }
+            throw allBaseUrlsFailed(failures)
+        }
+
+        private fun collectModelPlazaRequestsWithResolvedSpec(
+            activeBrowser: Browser,
+            config: BrowserConfig,
+            spec: WebPageScreenshotSpec,
+            modelNames: List<String>,
+            options: ModelPlazaCollectorOptions,
+            environment: Map<String, String>
+        ): List<ModelPlazaBrowserResult> {
+            val part = spec.screenshotParts.single()
+            val pageUrl = part.steps.firstOrNull { it.op == "goto" }?.url
+                ?: error("Model Plaza collector requires a page URL")
+            require(ModelPlazaRequestAction.isModelPlazaPage(pageUrl, pageUrl)) {
+                "Model Plaza collector only supports /model-plaza"
+            }
+            part.steps.filter { it.op == "goto" || it.op == "wait_url" }.forEach { step ->
+                require(ModelPlazaRequestAction.isModelPlazaPage(step.url.orEmpty(), pageUrl)) {
+                    "Model Plaza navigation must stay on the configured page"
+                }
+            }
+            return withResolvedSession(activeBrowser, config, spec, environment) { session ->
+                val page = session.context.newPage()
+                val authSignal = BrowserAuthRejectionSignal(page, session.auth)
+                // 记录被拦截的主文档跳转目标：服务端 302 到登录页时 navigate 会因拦截而失败，需据此识别为认证失效。
+                val blockedNavigation = AtomicReference<String?>(null)
+                try {
+                    // 主文档导航只允许停留在 /model-plaza；子资源与认证 API 请求交给既有路由继续处理。
+                    page.route("**/*") { route ->
+                        val blockedUrl = runCatching {
+                            val request = route.request()
+                            request.url().takeIf { url ->
+                                request.isNavigationRequest() &&
+                                    request.frame() == page.mainFrame() &&
+                                    !ModelPlazaRequestAction.isModelPlazaLocation(url, pageUrl)
+                            }
+                        }.getOrNull()
+                        try {
+                            if (blockedUrl != null) {
+                                blockedNavigation.compareAndSet(null, blockedUrl)
+                                route.abort()
+                            } else {
+                                route.fallback()
+                            }
+                        } catch (error: Throwable) {
+                            // 页面关闭等竞态下 route 可能已失效；记录原因，失败会由后续等待或页面校验暴露出来。
+                            WebHookDebug.log(
+                                "[XAiWebHook] [browser] Model Plaza route handling failed: ${summarizeError(error)}"
+                            )
+                        }
+                    }
+                    try {
+                        part.steps.forEach { step ->
+                            runStep(page, step, config, environment, authSignal)
+                            requireModelPlazaLocation(page, pageUrl)
+                        }
+                        authSignal.throwIfRejected(page)
+                        waitBeforeScreenshot(page, part, authSignal)
+                        requireModelPlazaLocation(page, pageUrl)
+                        val searched = tryModelPlazaSearch(page, part, options, authSignal, pageUrl)
+                        requireModelPlazaLocation(page, pageUrl)
+                        val cards = page.locator(options.modelCardSelector)
+                        waitForModelPlazaCards(page, cards, part, options, authSignal, pageUrl)
+                        waitForModelPlazaMetrics(page, cards, options, searched, authSignal)
+                        requireModelPlazaLocation(page, pageUrl)
+                        readModelPlazaResults(
+                            page = page,
+                            cards = cards,
+                            part = part,
+                            config = config,
+                            modelNames = modelNames,
+                            options = options,
+                            authSignal = authSignal,
+                            pageUrl = pageUrl
+                        )
+                    } catch (error: Throwable) {
+                        val blockedUrl = blockedNavigation.get()
+                        if (blockedUrl == null || error is CancellationException || error is InterruptedException) {
+                            throw error
+                        }
+                        // 主文档曾试图离开 /model-plaza：跳往登录页视为认证失效，其它路径按越界导航报错。
+                        throw IllegalStateException(
+                            if (isLoginLocation(blockedUrl)) MODEL_PLAZA_LOGIN_REDIRECT_MESSAGE else MODEL_PLAZA_OUTSIDE_MESSAGE,
+                            error
+                        )
+                    }
+                } finally {
+                    runCatching { page.unroute("**/*") }
+                    authSignal.close()
+                    runCatching { page.close() }
+                }
+            }
+            }
+
+        private fun requireModelPlazaLocation(page: Page, expectedUrl: String): Unit {
+            val currentUrl = page.url()
+            if (ModelPlazaRequestAction.isModelPlazaLocation(currentUrl, expectedUrl)) return
+            if (isLoginLocation(currentUrl)) {
+                // 前端路由守卫发现登录态失效时会跳转登录页；按认证失败处理，由调用方刷新 token 后重试一次。
+                throw IllegalStateException(MODEL_PLAZA_LOGIN_REDIRECT_MESSAGE)
+            }
+            throw IllegalStateException(MODEL_PLAZA_OUTSIDE_MESSAGE)
+        }
+
+        private fun isLoginLocation(url: String): Boolean {
+            val path = runCatching { URI(url).path }.getOrNull().orEmpty()
+            return path == "/login" || path.startsWith("/login/")
+        }
+
+        /** 填入关键词并返回是否执行过搜索；搜索框缺失属于页面结构或选择器错误，必须报错而不是返回空数据。 */
+        private fun tryModelPlazaSearch(
+            page: Page,
+            part: BrowserScreenshotPart,
+            options: ModelPlazaCollectorOptions,
+            authSignal: BrowserAuthRejectionSignal,
+            pageUrl: String
+        ): Boolean {
+            val selector = options.searchSelector ?: return false
+            val pattern = options.searchPattern ?: return false
+            val search = page.locator(selector)
+            if (!waitForLocatorWithAuthSignal(
+                    page = page,
+                    locator = search,
+                    state = WaitForSelectorState.VISIBLE,
+                    timeoutMillis = part.timeoutMillis,
+                    authSignal = authSignal
+                )
+            ) {
+                requireModelPlazaLocation(page, pageUrl)
+                throw TimeoutError("Model Plaza search selector was not visible before timeout")
+            }
+            search.fill(pattern, Locator.FillOptions().setTimeout(part.timeoutMillis.toDouble()))
+            authSignal.throwIfRejected(page)
+            try {
+                search.press("Enter", Locator.PressOptions().setTimeout(part.timeoutMillis.toDouble()))
+            } catch (_: TimeoutError) {
+                // 输入事件已经触发前端过滤；Enter 仅作兼容，超时不影响结果。
+                authSignal.throwIfRejected(page)
+            }
+            return true
+        }
+
+        /** 等待至少一张带模型名的卡片出现；加载占位块即使命中宽松卡片选择器也不会被当作结果。 */
+        private fun waitForModelPlazaCards(
+            page: Page,
+            cards: Locator,
+            part: BrowserScreenshotPart,
+            options: ModelPlazaCollectorOptions,
+            authSignal: BrowserAuthRejectionSignal,
+            pageUrl: String
+        ): Unit {
+            if (!waitForLocatorWithAuthSignal(
+                    page = page,
+                    locator = cards.locator(options.modelNameSelector).first(),
+                    state = WaitForSelectorState.ATTACHED,
+                    timeoutMillis = part.timeoutMillis,
+                    authSignal = authSignal
+                )
+            ) {
+                requireModelPlazaLocation(page, pageUrl)
+                throw TimeoutError("Model Plaza model cards were not rendered before timeout")
+            }
+            authSignal.throwIfRejected(page)
+        }
+
+        /**
+         * 性能数据由页面异步批量加载；最多等待 search_wait_ms，期间只要有卡片显示吞吐就立即继续。
+         * 全部模型都没有近期数据时会等满上限，随后按字段输出“暂无数据”。
+         */
+        private fun waitForModelPlazaMetrics(
+            page: Page,
+            cards: Locator,
+            options: ModelPlazaCollectorOptions,
+            searched: Boolean,
+            authSignal: BrowserAuthRejectionSignal
+        ): Unit {
+            val budgetMillis = options.searchWaitMillis
+            if (budgetMillis <= 0L) return
+            val deadline = System.nanoTime() + budgetMillis * 1_000_000L
+            if (searched) {
+                waitForTimeoutWithAuthSignal(page, minOf(MODEL_PLAZA_SEARCH_SETTLE_MILLIS, budgetMillis), authSignal)
+            }
+            val performanceRows = cards.locator(options.performanceSelector)
+            while (true) {
+                authSignal.throwIfRejected(page)
+                if (performanceRows.allInnerTexts().any { text -> MODEL_PLAZA_THROUGHPUT_PATTERN.containsMatchIn(text) }) {
+                    return
+                }
+                val remainingMillis = (deadline - System.nanoTime()) / 1_000_000L
+                if (remainingMillis <= 0L) return
+                waitForTimeoutWithAuthSignal(
+                    page,
+                    remainingMillis.coerceAtMost(MODEL_PLAZA_METRICS_POLL_MILLIS),
+                    authSignal
+                )
+            }
+        }
+
+        private fun readModelPlazaResults(
+            page: Page,
+            cards: Locator,
+            part: BrowserScreenshotPart,
+            config: BrowserConfig,
+            modelNames: List<String>,
+            options: ModelPlazaCollectorOptions,
+            authSignal: BrowserAuthRejectionSignal,
+            pageUrl: String
+        ): List<ModelPlazaBrowserResult> {
+            data class CardSnapshot(
+                val card: Locator,
+                val text: String,
+                val displayName: String?
+            )
+
+            val snapshots = (0 until cards.count()).map { cardIndex ->
+                authSignal.throwIfRejected(page)
+                val card = cards.nth(cardIndex)
+                CardSnapshot(
+                    card = card,
+                    text = readInnerText(card).orEmpty(),
+                    displayName = readRelativeInnerText(card, options.modelNameSelector)
+                )
+            }
+            val assignments = assignModelPlazaCards(
+                modelNames = modelNames,
+                cardNames = snapshots.map { snapshot -> snapshot.displayName },
+                cardTexts = snapshots.map { snapshot -> snapshot.text }
+            )
+            val results = arrayOfNulls<ModelPlazaBrowserResult>(modelNames.size)
+            assignments.forEachIndexed { cardIndex, modelIndex ->
+                if (modelIndex == null) return@forEachIndexed
+                authSignal.throwIfRejected(page)
+                val snapshot = snapshots[cardIndex]
+                val performanceText = readRelativeInnerText(snapshot.card, options.performanceSelector)
+                val metrics = extractModelPlazaMetrics(performanceText, snapshot.text)
+                val screenshot = captureModelPlazaSparkline(
+                    card = snapshot.card,
+                    options = options,
+                    timeoutMillis = part.timeoutMillis,
+                    maxScreenshotBytes = config.maxScreenshotBytes
+                )
+                requireModelPlazaLocation(page, pageUrl)
+                // 输出使用 API 返回的原始模型名，与“模型/分组”命令保持一致，也避免显示名重复造成混淆。
+                results[modelIndex] = ModelPlazaBrowserResult(
+                    modelName = modelNames[modelIndex],
+                    throughputText = metrics.first,
+                    latencyText = metrics.second,
+                    screenshot = screenshot
+                )
+            }
+            authSignal.throwIfRejected(page)
+            return results.mapIndexed { index, result ->
+                result ?: ModelPlazaBrowserResult(modelNames[index], null, null, null)
+            }
+        }
+
+        /**
+         * 优先读取性能行；只有性能行缺失时才回退到整张卡片文本，并且延迟只取吞吐之后的值，
+         * 避免把描述或价格里的 “2s” 之类文字误认为延迟。
+         */
+        private fun extractModelPlazaMetrics(performanceText: String?, cardText: String): Pair<String?, String?> {
+            if (performanceText != null) {
+                return MODEL_PLAZA_THROUGHPUT_PATTERN.find(performanceText)?.value?.trim() to
+                    MODEL_PLAZA_LATENCY_PATTERN.find(performanceText)?.value?.trim()
+            }
+            val throughput = MODEL_PLAZA_THROUGHPUT_PATTERN.find(cardText) ?: return null to null
+            val latency = MODEL_PLAZA_LATENCY_PATTERN.find(cardText.substring(throughput.range.last + 1))
+            return throughput.value.trim() to latency?.value?.trim()
+        }
+
+        private fun captureModelPlazaSparkline(
+            card: Locator,
+            options: ModelPlazaCollectorOptions,
+            timeoutMillis: Long,
+            maxScreenshotBytes: Long
+        ): ByteArray? {
+            val sparkline = modelPlazaSparkline(card, options) ?: return null
+            return try {
+                sparkline.screenshot(
+                    Locator.ScreenshotOptions().setTimeout(timeoutMillis.coerceAtMost(10_000L).toDouble())
+                ).also { bytes -> validateScreenshotSize(bytes.size, maxScreenshotBytes) }
+            } catch (_: TimeoutError) {
+                // 图表存在但不可见时只让该模型图片缺失，其它字段和模型照常返回。
+                null
+            }
+        }
+
+        private fun modelPlazaSparkline(card: Locator, options: ModelPlazaCollectorOptions): Locator? {
+            val candidates = buildList {
+                options.sparklineSelector?.let { selector -> add(card.locator(normalizeSelector(selector))) }
+                MODEL_PLAZA_SPARKLINE_SELECTORS.forEach { selector -> add(card.locator(selector)) }
+                // 英文界面没有中文 aria-label，性能行内唯一的 role=img 即成功率图表。
+                add(card.locator(options.performanceSelector).locator("[role=\"img\"][aria-label]"))
+            }
+            return candidates.firstNotNullOfOrNull { candidate -> candidate.firstOrNullIfPresent() }
+        }
+
+        private fun Locator.firstOrNullIfPresent(): Locator? {
+            return if (count() > 0) first() else null
         }
 
         private fun captureWithResolvedSpec(
@@ -3121,6 +3630,13 @@ internal data class WebPageScreenshotSpec(
     val screenshotLayout: BrowserScreenshotLayout,
     val retry: BrowserScreenshotRetry,
     val baseUrls: List<String> = emptyList()
+)
+
+internal data class ModelPlazaBrowserResult(
+    val modelName: String,
+    val throughputText: String?,
+    val latencyText: String?,
+    val screenshot: ByteArray?
 )
 
 internal data class BrowserScreenshotPart(

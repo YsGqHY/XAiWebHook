@@ -72,6 +72,81 @@ internal class QueryActionBehaviorTest {
     }
 
     @Test
+    fun `model plaza request values should normalize throughput and latency`() {
+        assertEquals("81.4", ModelPlazaRequestAction.normalizeThroughput("81.4 t/s"))
+        assertEquals("81.4", ModelPlazaRequestAction.normalizeThroughput("81.4 tok/s"))
+        assertEquals("19.5", ModelPlazaRequestAction.normalizeLatency("19500ms"))
+        assertEquals("0.1", ModelPlazaRequestAction.normalizeLatency("100ms"))
+        assertEquals("1.25", ModelPlazaRequestAction.normalizeLatency("1.25s"))
+        assertEquals("50", ModelPlazaRequestAction.normalizeThroughput("50.0 tps"))
+        assertNull(ModelPlazaRequestAction.normalizeLatency("暂无数据"))
+        assertNull(ModelPlazaRequestAction.normalizeThroughput("近 5 个时段成功率 0.0%"))
+        assertNull(ModelPlazaRequestAction.normalizeLatency("-1s"))
+    }
+
+    @Test
+    fun `model plaza card assignment should prefer exact names and consume each card once`() {
+        val assignments = WebPageScreenshotAction.assignModelPlazaCards(
+            modelNames = listOf("gpt-4", "gpt-4-turbo"),
+            cardNames = listOf("gpt-4-turbo", "gpt-4"),
+            cardTexts = listOf("gpt-4-turbo 81.4 tps", "gpt-4 50 tps")
+        )
+        assertEquals(listOf(1, 0), assignments)
+    }
+
+    @Test
+    fun `model plaza card assignment should choose longest fuzzy name once`() {
+        val assignments = WebPageScreenshotAction.assignModelPlazaCards(
+            modelNames = listOf("gpt", "gpt-4"),
+            cardNames = listOf("gpt-4", null),
+            cardTexts = listOf("gpt-4 81.4 tps", "gpt 50 tps")
+        )
+        assertEquals(listOf(1, 0), assignments)
+    }
+
+    @Test
+    fun `model plaza card assignment should match raw model name line under a display name`() {
+        val assignments = WebPageScreenshotAction.assignModelPlazaCards(
+            modelNames = listOf("claude-opus-5"),
+            cardNames = listOf("Claude Opus 5"),
+            cardTexts = listOf("Claude Opus 5\nclaude-opus-5\n输入 3 /M\n81.46 t/s\n19.5s")
+        )
+        assertEquals(listOf(0), assignments)
+    }
+
+    @Test
+    fun `model plaza fuzzy assignment should respect whole name boundaries`() {
+        val assignments = WebPageScreenshotAction.assignModelPlazaCards(
+            modelNames = listOf("gpt-4"),
+            cardNames = listOf("gpt-4o"),
+            cardTexts = listOf("gpt-4o\n50 t/s")
+        )
+        assertEquals(listOf<Int?>(null), assignments)
+    }
+
+    @Test
+    fun `model plaza request alignment should retain missing fields per model`() {
+        val aligned = ModelPlazaRequestAction.alignResults(
+            modelNames = listOf("gpt-4", "claude-3"),
+            collected = listOf(
+                ModelPlazaBrowserResult(
+                    modelName = "GPT-4",
+                    throughputText = "81.4 t/s",
+                    latencyText = "19500ms",
+                    screenshot = byteArrayOf(1)
+                )
+            )
+        )
+
+        assertEquals(2, aligned.size)
+        assertEquals("gpt-4", aligned[0].modelName)
+        assertEquals("81.4 t/s", aligned[0].throughputText)
+        assertEquals(null, aligned[1].throughputText)
+        assertEquals(null, aligned[1].latencyText)
+        assertNull(aligned[1].screenshot)
+    }
+
+    @Test
     fun `model plaza relations should honor sort and limits`() {
         val relations = listOf(
             GroupModelsRelation("beta", listOf("m1", "m2", "m3")),
