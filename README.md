@@ -263,6 +263,7 @@ outgoing:
 | `send_codex_radar_report` | 读取 Codex Radar 页面并合成雷达分/社区体感分图片 |
 | `query_model_plaza_models` | 匹配所有包含关键词的分组，并分别列出各分组模型 |
 | `query_model_plaza_groups` | 匹配所有包含关键词的模型，并分别列出各模型分组 |
+| `query_model_plaza_requests` | 访问 `/model-plaza` 查询请求信息；不超过 3 条返回普通图文，超过 3 条返回合并转发 |
 | `reply` | 构造 Incoming HTTP 响应 |
 | `execute_command` | 执行 mirai-console 命令，默认禁用 |
 
@@ -325,10 +326,11 @@ cooldown:
 
 ## Model Plaza 查询
 
-通过 outgoing 路由在指定群聊中触发模型和分组查询。群成员发送特定消息格式即可查询 Geek2API 模型广场数据：
+通过 outgoing 路由在指定群聊中触发模型、分组和请求记录查询。群成员发送特定消息格式即可查询 Geek2API 模型广场数据：
 
 - **按分组关键词查询模型**：发送 `模型 <关键词>`；例如 `模型 gpt` 会命中 `gpt`、`gptpro`、`gpt-Azure` 等分组，并分别列出各分组拥有的模型
 - **按模型关键词查询分组**：发送 `分组 <关键词>`；例如 `分组 gpt` 会命中所有名称包含 `gpt` 的模型，并分别列出各模型所属分组
+- **按模型关键词查询请求记录**：发送 `请求 <关键词>`；例如 `请求 gpt` 会命中所有名称包含 `gpt` 的模型，在 `/model-plaza` 页面读取每个模型卡片的吞吐、延迟，并截取该模型的近期成功率图表
 
 支持不区分大小写的子串模糊匹配；同名分组、模型及其关联结果会自动合并去重。
 
@@ -392,7 +394,21 @@ outgoing:
           pending_message: "正在查询模型分组，请稍候..."
           failure_message: "查询失败，请稍后重试"
           empty_message: "未找到包含该关键词的模型"
+
+    - id: "model-plaza-query-requests"
+      enabled: true  # 修改为 true 启用；还需要 browser.enabled: true
+      events: ["group_message"]
+      groups: [123456789]  # 替换为实际群号
+      message:
+        starts_with: ["请求"]
+      actions:
+        - type: "query_model_plaza_requests"
+          pending_message: "正在查询模型请求记录，请稍候..."
+          failure_message: "查询失败，请稍后重试"
+          empty_message: "未找到包含“${query}”的模型"
 ```
+
+“请求”查询额外依赖浏览器自动化：`browser.enabled` 必须为 `true`，`browser.allowed_hosts` 必须包含 `model_plaza.base_url` 的域名（默认配置已包含 `hk*.geek2api.com`）。它复用“模型/分组”查询已经取得的登录令牌，不会再次打开 CLI Bridge 授权页。
 
 3. 执行 `/xwebhook reload` 重载配置
 
@@ -440,13 +456,39 @@ outgoing:
 - gpt
 ```
 
+发送：
+
+```
+请求 gpt
+```
+
+匹配到 3 个及以下模型时，机器人把所有模型放在同一条消息里，每个模型一段：
+
+```
+gpt-4
+吞吐: 81.46tok/s 延迟: 19.5s
+[成功率图表]
+
+gpt-5
+吞吐: 暂无数据 延迟: 暂无数据
+图片：暂无数据
+```
+
+匹配到 4 个及以上模型时，改为发送一条合并转发消息，转发记录中每个模型独占一个节点，节点内容与上面的单段格式相同。没有匹配到模型时回复 `未找到包含“gpt”的模型`。
+
 ### 技术说明
 
-- 使用登录 JWT 和原浏览器 Cookie 缓存直连 Geek2API `/api/v1/model-plaza` 接口，不依赖页面 DOM
+- “模型/分组”查询使用登录 JWT 和原浏览器 Cookie 缓存直连 Geek2API `/api/v1/model-plaza` 接口，不依赖页面 DOM
 - 支持 `hk → hk2 → hk3 → hk4 → hk5` 入口 failover，并在 401 时刷新 Token 后重试一次
 - 支持自定义 `query_pattern` 参数覆盖默认提取逻辑
 - 模糊匹配全部命中项，按分组或模型聚合关联结果并去重
 - 支持配置冷却时间和单飞控制避免并发查询
+- “请求”查询先用同一接口确定匹配的模型名，再在同一个浏览器页面中打开 `/model-plaza`、填入关键词，逐个读取模型卡片；页面一旦被跳转到 `/model-plaza` 以外会立即停止。若被跳转到登录页（登录态失效），会刷新一次登录令牌后重试，仍失败则回复 `failure_message`
+- “请求”查询的失败日志会屏蔽 token、secret、Authorization 头和 JWT，群内只发送 `failure_message`
+- 每张模型卡片只会对应一个模型：先按卡片标题精确匹配，再按卡片中单独一行的原始模型名匹配，最后才做完整词边界的模糊匹配，避免 `gpt-4` 借用 `gpt-4o` 的数据
+- 吞吐、延迟取自模型卡片底部的指标行（页面默认展示成功率最高、有数据的分组），延迟统一换算为秒；图表截图只包含成功率图表元素本身
+- 某个模型缺少吞吐、延迟或图表时只把对应字段显示为“暂无数据”，其它模型照常返回；搜索框或模型卡片找不到、页面跳转等结构性错误会回复 `failure_message`，不会伪装成“暂无数据”
+- 页面结构变化时可在动作中覆盖 `search_selector`、`model_card_selector`、`model_name_selector`、`performance_selector`、`sparkline_selector`；默认选择器依据页面前端代码与示例 XPath 编写，线上页面以实际运行结果为准
 
 ## 命令与权限
 
