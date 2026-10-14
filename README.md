@@ -486,16 +486,109 @@ gpt-5
 - “请求”查询先用同一接口确定匹配的模型名，再在同一个浏览器页面中打开 `/model-plaza`、填入关键词，逐个读取模型卡片；页面一旦被跳转到 `/model-plaza` 以外会立即停止。若被跳转到登录页（登录态失效），会刷新一次登录令牌后重试，仍失败则回复 `failure_message`
 - “请求”查询的失败日志会屏蔽 token、secret、Authorization 头和 JWT，群内只发送 `failure_message`
 - 每张模型卡片只会对应一个模型：先按卡片标题精确匹配，再按卡片中单独一行的原始模型名匹配，最后才做完整词边界的模糊匹配，避免 `gpt-4` 借用 `gpt-4o` 的数据
-- 吞吐、延迟取自模型卡片底部的指标行（页面默认展示成功率最高、有数据的分组），延迟统一换算为秒；图表截图只包含成功率图表元素本身
+- 吞吐、延迟取自模型卡片底部的指标行（页面默认展示成功率最高、有数据的分组），延迟统一换算为秒；成功率截图保留原图内容，在最外层增加边框，并在边框左侧复制图中右侧可见百分比；整张图片左右各留白约 5% 宽度、上下各留白约 1% 高度（以加留白前的图片尺寸为基准，向上取整且至少 1 像素）
 - 某个模型缺少吞吐、延迟或图表时只把对应字段显示为“暂无数据”，其它模型照常返回；搜索框或模型卡片找不到、页面跳转等结构性错误会回复 `failure_message`，不会伪装成“暂无数据”
-- 页面结构变化时可在动作中覆盖 `search_selector`、`model_card_selector`、`model_name_selector`、`performance_selector`、`sparkline_selector`；默认选择器依据页面前端代码与示例 XPath 编写，线上页面以实际运行结果为准
+- 页面结构变化时可在动作中覆盖 `search_selector`、`model_card_selector`、`model_name_selector`、`performance_selector`、`sparkline_selector`、`percentage_selector`；成功率百分比默认按每张卡片的相对 XPath `./div[2]/div[2]/div/span[3]/span` 获取，对应用户提供的完整路径 `//*[@id="app"]/div[2]/div[2]/main/div/div[3]/div[1]/div[2]/div[2]/div/span[3]/span`，也支持直接填写完整 XPath
+
+### 请求记录图片构建配置
+
+图片依次经过：图表/百分比 DOM 截图 → 计算边框、间距和画布尺寸 → 填背景并原样复制截图 → 编码 PNG → 校验截图大小。原图文字、字体、颜色和竖条均由网页提供，合成阶段不缩放、不重绘。
+
+图片样式独立保存在插件配置目录的 `request_image.yml`。首次启动自动生成默认文件并加载；修改保存后，文件内容连续两次检查一致即校验并应用，通常约 1–2 秒生效。只影响后续 `请求` 查询生成的图片，已发送的消息不会被修改；同一次查询中的所有模型使用同一份样式快照。无需重启插件、HTTP 服务或浏览器。
+
+默认配置如下，逐项中文注释见 [src/main/resources/request_image.yml](src/main/resources/request_image.yml)。所有尺寸单位为像素，百分数 `5.0` 表示 5%，不是比例 `0.05`：
+
+```yaml
+version: 1
+border:
+  enabled: true
+  width_px: 1
+  padding_px: 2
+  color: "#FF3B30"
+percentage:
+  enabled: true
+  gap_px: 6
+  vertical_align: "center"
+margin:
+  left_percent: 5.0
+  right_percent: 5.0
+  top_percent: 1.0
+  bottom_percent: 1.0
+  min_px: 1
+background:
+  margin_color: "#FFFFFF"
+  content_color: "auto"
+output:
+  max_pixels: 16000000
+```
+
+| 字段 | 含义 | 默认值 | 有效范围/格式 |
+| --- | --- | --- | --- |
+| `version` | 配置格式版本 | `1` | 仅整数 `1` |
+| `border.enabled` | 外框开关；关闭后也不增加边框内边距 | `true` | 布尔值 |
+| `border.width_px` | 边框线宽；`0` 不绘制线条 | `1` | 整数 `0–16` |
+| `border.padding_px` | 原图与边框之间的内边距 | `2` | 整数 `0–128` |
+| `border.color` | 边框颜色 | `"#FF3B30"` | 颜色字符串 |
+| `percentage.enabled` | 左侧百分比副本开关；关闭不影响原图中的右侧文字 | `true` | 布尔值 |
+| `percentage.gap_px` | 副本与原图外框之间的间距 | `6` | 整数 `0–256` |
+| `percentage.vertical_align` | 副本在内容区内的竖向对齐 | `"center"` | `top/center/bottom` |
+| `margin.left_percent` / `margin.right_percent` | 左右外边距，以加外边距前的完整内容宽度计算 | 各 `5.0` | 有限数字 `0–50`；`0` 关闭该侧留白 |
+| `margin.top_percent` / `margin.bottom_percent` | 上下外边距，以加外边距前的完整内容高度计算 | 各 `1.0` | 有限数字 `0–50`；`0` 关闭该侧留白 |
+| `margin.min_px` | 非零比例边距向上取整后的最小像素数 | `1` | 整数 `0–128` |
+| `background.margin_color` | 四侧外边距背景 | `"#FFFFFF"` | 颜色字符串 |
+| `background.content_color` | 新增间隙和内边距的底色，不覆盖原截图 | `"auto"` | `auto` 取原图左上角像素，或颜色字符串 |
+| `output.max_pixels` | 创建合成画布前的最大像素总量 | `16000000` | 整数 `1–64000000` |
+
+颜色采用带引号的 `"#RRGGBB"` 或 `"#AARRGGBB"`，后者 alpha 在前。例如 `"#00000000"` 为全透明。输出固定为 PNG，同时仍受 `webhook_config.yml` 中的 `browser.max_screenshot_bytes` 限制。像素数或字节数超限时只省略该模型的图片，指标和其他模型照常返回。
+
+未能取得百分比元素时，沿用原有降级：保留原图及外边距，不伪造左侧数值或增加外框；主动关闭 `percentage.enabled` 时，边框开关仍可独立生效。图表/百分比选择器、浏览器视口、认证和超时仍使用主配置及动作参数，独立图片配置只负责合成。
+
+**校验与失败处理**：错误类型、越界数字、NaN/Infinity、非法颜色、未知/重复字段、不支持的版本、空/多文档 YAML 或超过 64 KiB 的文件都会被拒绝；缺省字段采用内置默认值，显式 `null` 无效。候选配置整份通过校验后才替换有效值，不会只应用其中几个字段。运行中修改无效或文件被删除时保留上一份有效值，控制台记录原因，`/xwebhook image-config` 和 `status` 可查看错误；修复并保存后自动恢复。新进程首次启动已有无效文件时使用内置有效默认值，同时保留原文件供修复；同一进程内重新启用插件时，仍会保留最后有效样式、修订号和最近成功时间。
+
+**读写方式**：
+
+- 直接编辑配置文件：自动检查并生效，不必执行主配置 `reload`。
+- `/xwebhook image-config`：读取当前有效 YAML、文件路径、修订号、监听状态与最近错误。
+- `/xwebhook image-config-set margin.left_percent 8`：校验单项更新、保存到文件并立即应用。颜色示例：`/xwebhook image-config-set border.color #22C55E`。
+- `/xwebhook image-config-reload`：立即从磁盘重载图片配置，不重启服务。
+
+管理命令继承 `kim.hhhhhy.x.webhook:admin` 权限。代码写入先校验、写同目录临时文件并刷新，然后原子替换配置文件；成功落盘才更新内存。校验/写入失败时文件和当前有效值保持原样；文件系统不支持原子替换时明确报错，不退化为直接覆盖。单项更新在锁内完成读改写，避免并发修改不同字段时互相覆盖。若磁盘文件已经无效或不可读取，单项更新会拒绝执行，保留用户尚待修复的内容；请先修复文件，或通过 `write`/`writeYaml` 明确整体替换。`write` 和 `update` 会重新生成带默认说明的规范 YAML，自定义注释会被替换；`writeYaml` 保留调用方提供的原文及注释。
+
+受信任的依赖插件可使用 `kim.hhhhhy.x.webhook.api.XAiWebHookRequestImageApi`：
+
+| 接口 | 行为 |
+| --- | --- |
+| `read(): RequestImageStyle` | 当前不可变样式快照 |
+| `readYaml(): String` | 当前有效配置的完整 YAML；不是磁盘上尚未通过校验的内容 |
+| `status(): RequestImageConfigStatus` | 文件路径、修订号、监听状态、最近成功时间、最近错误 |
+| `suspend write(style): RequestImageConfigUpdateResult` | 校验对象、保存并立即应用 |
+| `suspend writeYaml(yaml): RequestImageConfigUpdateResult` | 校验 YAML、保存并立即应用 |
+| `suspend update(key, value): RequestImageConfigUpdateResult` | 按点分字段路径原子更新，值传字符串 |
+| `suspend reload(): RequestImageConfigUpdateResult` | 立即校验并加载磁盘文件，不写文件 |
+
+更新结果含 `success`、`style`、`revision`、`error`；失败时返回仍然有效的样式与修订号。写入/重载使用 IO dispatcher；插件未启动或已停止时返回失败，不会自行启动监听器，只读接口仍可返回默认或最后有效快照。
+
+```kotlin
+// 在调用方的协程中执行。修改百分比，不改变同一次查询已经取得的快照。
+val current = XAiWebHookRequestImageApi.read()
+val result = XAiWebHookRequestImageApi.write(current.copy(
+    margin = current.margin.copy(leftPercent = 8.0, rightPercent = 8.0)
+))
+check(result.success) { result.error.orEmpty() }
+
+// 更新单个字段；与其他字段的并发更新不会互相覆盖。
+val updated = XAiWebHookRequestImageApi.update("border.color", "#22C55E")
+```
 
 ## 命令与权限
 
 | 命令 | 说明 |
 | --- | --- |
-| `/xwebhook reload` | 重载 YAML 并重启 WebHook 服务 |
-| `/xwebhook status` | 查看服务、路由、浏览器和最近错误 |
+| `/xwebhook reload` | 重载主配置与图片配置，并重启 WebHook 服务 |
+| `/xwebhook status` | 查看服务、路由、浏览器、图片配置修订号和最近错误 |
+| `/xwebhook image-config` | 查看当前有效图片配置与自动加载状态 |
+| `/xwebhook image-config-set <字段路径> <值>` | 校验、保存并立即应用单项图片配置 |
+| `/xwebhook image-config-reload` | 只重载图片配置，不重启 HTTP 或浏览器 |
 
 主要权限：
 

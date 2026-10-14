@@ -49,7 +49,7 @@ narrator: NarraFork
   - `isAuthenticated = !!token && !!user`，`checkAuth` 同时读取 localStorage 的 `auth_token` 与 `auth_user`；只写 token 会被判定未登录。
   - 页面搜索框为 `v-model` 文本输入，过滤条件同时匹配模型原始名、平台、渠道和分组名，是接口模糊匹配的超集；列表无分页、无虚拟滚动。
   - 模型卡片吞吐显示为 `xx.xx t/s`，延迟为 `NNNms` 或 `N.Ns`；成功率图表根节点 `role="img"`，aria-label 为“近 {有样本时段数} 个时段成功率，最低 {x}%”，时段数会变化。
-  - 用户给出的第一张卡片 XPath `.../main/div/div[3]/div[1]/div[2]/div[2]/div` 与卡片模板中“底部区域 → 指标行”的层级一致。
+  - 用户给出的第一张卡片 XPath `//*[@id="app"]/div[2]/div[2]/main/div/div[3]/div[1]/div[2]/div[2]/div` 与卡片模板中“底部区域 → 指标行”的层级一致；右侧百分比元素为其后缀 `/span[3]/span`，实现中按每张卡片使用相对 XPath `./div[2]/div[2]/div/span[3]/span`。
 
 ## 关键设计决策
 
