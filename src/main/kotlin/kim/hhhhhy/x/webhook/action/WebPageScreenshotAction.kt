@@ -19,8 +19,10 @@ import kim.hhhhhy.x.webhook.XAiWebHook
 import kim.hhhhhy.x.webhook.api.BrowserTextListItem
 import kim.hhhhhy.x.webhook.api.BrowserTextListRequest
 import kim.hhhhhy.x.webhook.api.BrowserTextListResult
+import kim.hhhhhy.x.webhook.api.XAiWebHookRequestImageApi
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
+import kim.hhhhhy.x.webhook.config.RequestImageStyle
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.template.TemplateEngine
@@ -41,6 +43,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.awt.AlphaComposite
+import java.awt.Color
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -93,6 +97,8 @@ internal object WebPageScreenshotAction {
             "//*[@id=\"app\"]//main//div[@role=\"button\"][.//h3]"
     private const val DEFAULT_MODEL_PLAZA_NAME_SELECTOR = "xpath=.//h3"
     private const val DEFAULT_MODEL_PLAZA_PERFORMANCE_SELECTOR = "xpath=./div[2]/div[2]/div"
+    // 用户给出的完整 XPath 去掉模型列表和卡片前缀，逐张卡片定位同一位置的百分比。
+    private const val DEFAULT_MODEL_PLAZA_PERCENTAGE_SELECTOR = "xpath=./div[2]/div[2]/div/span[3]/span"
     private const val DEFAULT_MODEL_PLAZA_SEARCH_WAIT_MILLIS = 5_000L
     private const val MODEL_PLAZA_SEARCH_SETTLE_MILLIS = 500L
     private const val MODEL_PLAZA_METRICS_POLL_MILLIS = 250L
@@ -135,7 +141,9 @@ internal object WebPageScreenshotAction {
         val modelCardSelector: String,
         val modelNameSelector: String,
         val performanceSelector: String,
-        val sparklineSelector: String?
+        val sparklineSelector: String?,
+        val percentageSelector: String,
+        val imageStyle: RequestImageStyle
     )
 
     suspend fun capture(
@@ -441,7 +449,14 @@ internal object WebPageScreenshotAction {
                 ?: DEFAULT_MODEL_PLAZA_PERFORMANCE_SELECTOR,
             sparklineSelector = renderOptionalString(action.params["sparkline_selector"], context)
                 ?.trim()
+                ?.ifBlank { null },
+            percentageSelector = renderOptionalString(action.params["percentage_selector"], context)
+                ?.trim()
                 ?.ifBlank { null }
+                ?.let(::normalizeSelector)
+                ?: DEFAULT_MODEL_PLAZA_PERCENTAGE_SELECTOR,
+            // 一次查询的所有模型共用同一份不可变样式；热重载只影响后续查询。
+            imageStyle = XAiWebHookRequestImageApi.read()
         )
         return worker().collectModelPlazaRequests(
             config = browserConfig,
@@ -841,6 +856,77 @@ internal object WebPageScreenshotAction {
             graphics.dispose()
         }
 
+        return ByteArrayOutputStream().use { output ->
+            check(ImageIO.write(combined, "png", output)) { "PNG image writer is unavailable" }
+            output.toByteArray()
+        }
+    }
+
+    /** 使用一份已校验的样式快照合成图片，不缩放或重绘原始 DOM 截图。 */
+    internal fun decorateModelPlazaScreenshot(
+        originalBytes: ByteArray,
+        percentageBytes: ByteArray?,
+        style: RequestImageStyle = RequestImageStyle()
+    ): ByteArray {
+        style.validate()
+        fun decode(bytes: ByteArray): BufferedImage = ByteArrayInputStream(bytes).use { input ->
+            requireNotNull(ImageIO.read(input)) { "Model Plaza screenshot is not a supported image" }
+        }
+        val original = decode(originalBytes)
+        val percentage = percentageBytes?.takeIf { style.percentage.enabled }?.let(::decode)
+        // 自动采集缺少百分比时维持原有降级；用户关闭副本时仍可独立配置边框。
+        val frameEnabled = style.border.enabled && (percentage != null || !style.percentage.enabled)
+        val border = if (frameEnabled) style.border.widthPixels else 0
+        val padding = if (frameEnabled) style.border.paddingPixels else 0
+        val gap = if (percentage != null) style.percentage.gapPixels else 0
+        val inset = border + padding
+        val frameWidth = original.width.toLong() + inset * 2L
+        val frameHeight = original.height.toLong() + inset * 2L
+        val contentWidth = (percentage?.width ?: 0).toLong() + gap + frameWidth
+        val contentHeight = maxOf(frameHeight, (percentage?.height ?: 0).toLong())
+        // 共用配置模型的十进制计算，避免浮点误差在向上取整时多出 1 像素。
+        val left = style.margin.leftPixels(contentWidth)
+        val right = style.margin.rightPixels(contentWidth)
+        val top = style.margin.topPixels(contentHeight)
+        val bottom = style.margin.bottomPixels(contentHeight)
+        val width = contentWidth + left + right
+        val height = contentHeight + top + bottom
+        require(width in 1L..Int.MAX_VALUE.toLong() && height in 1L..Int.MAX_VALUE.toLong()) {
+            "请求图片合成尺寸超出支持范围"
+        }
+        require(width * height <= style.output.maxPixels) {
+            "请求图片合成画布超过 output.max_pixels (${style.output.maxPixels})"
+        }
+        val combined = BufferedImage(width.toInt(), height.toInt(), BufferedImage.TYPE_INT_ARGB)
+        val graphics = combined.createGraphics()
+        try {
+            // Src 保留透明/半透明像素，避免原图文字抗锯齿与背景重新混合。
+            graphics.composite = AlphaComposite.Src
+            graphics.color = Color(style.background.marginArgb(), true)
+            graphics.fillRect(0, 0, combined.width, combined.height)
+            graphics.color = Color(style.background.contentArgbOrNull() ?: original.getRGB(0, 0), true)
+            graphics.fillRect(left.toInt(), top.toInt(), contentWidth.toInt(), contentHeight.toInt())
+            val frameX = left.toInt() + (percentage?.width ?: 0) + gap
+            val frameY = top.toInt() + (contentHeight.toInt() - frameHeight.toInt()) / 2
+            if (border > 0) {
+                graphics.color = Color(style.border.colorArgb(), true)
+                graphics.fillRect(frameX, frameY, frameWidth.toInt(), border)
+                graphics.fillRect(frameX, frameY + frameHeight.toInt() - border, frameWidth.toInt(), border)
+                graphics.fillRect(frameX, frameY, border, frameHeight.toInt())
+                graphics.fillRect(frameX + frameWidth.toInt() - border, frameY, border, frameHeight.toInt())
+            }
+            if (percentage != null) {
+                val percentageY = when (style.percentage.verticalAlign) {
+                    "top" -> 0
+                    "bottom" -> contentHeight.toInt() - percentage.height
+                    else -> (contentHeight.toInt() - percentage.height) / 2
+                }
+                graphics.drawImage(percentage, left.toInt(), top.toInt() + percentageY, null)
+            }
+            graphics.drawImage(original, frameX + inset, frameY + inset, null)
+        } finally {
+            graphics.dispose()
+        }
         return ByteArrayOutputStream().use { output ->
             check(ImageIO.write(combined, "png", output)) { "PNG image writer is unavailable" }
             output.toByteArray()
@@ -2130,6 +2216,7 @@ internal object WebPageScreenshotAction {
                 val performanceText = readRelativeInnerText(snapshot.card, options.performanceSelector)
                 val metrics = extractModelPlazaMetrics(performanceText, snapshot.text)
                 val screenshot = captureModelPlazaSparkline(
+                    page = page,
                     card = snapshot.card,
                     options = options,
                     timeoutMillis = part.timeoutMillis,
@@ -2165,20 +2252,68 @@ internal object WebPageScreenshotAction {
         }
 
         private fun captureModelPlazaSparkline(
+            page: Page,
             card: Locator,
             options: ModelPlazaCollectorOptions,
             timeoutMillis: Long,
             maxScreenshotBytes: Long
         ): ByteArray? {
             val sparkline = modelPlazaSparkline(card, options) ?: return null
+            val timeout = timeoutMillis.coerceAtMost(10_000L).toDouble()
+            val percentage = try {
+                if (options.imageStyle.percentage.enabled) modelPlazaPercentage(page, card, options) else null
+            } catch (_: PlaywrightException) {
+                // 百分比是可选装饰，定位失败不能让原始图表或指标丢失。
+                null
+            }
             return try {
-                sparkline.screenshot(
-                    Locator.ScreenshotOptions().setTimeout(timeoutMillis.coerceAtMost(10_000L).toDouble())
-                ).also { bytes -> validateScreenshotSize(bytes.size, maxScreenshotBytes) }
+                // 原图仍严格截取 aria-label 指向的图表，不扩展到整张卡片或指标行。
+                val original = sparkline.screenshot(Locator.ScreenshotOptions().setTimeout(timeout))
+                if (original.size.toLong() > maxScreenshotBytes) {
+                    WebHookDebug.log("[WebHook] Model Plaza screenshot exceeds max_screenshot_bytes; omitting image")
+                    return null
+                }
+                val percentageBytes = if (percentage != null) {
+                    try {
+                        percentage.screenshot(Locator.ScreenshotOptions().setTimeout(timeout))
+                    } catch (_: PlaywrightException) {
+                        null
+                    }
+                } else null
+                if (percentageBytes == null && options.imageStyle.percentage.enabled) {
+                    WebHookDebug.log("[WebHook] Model Plaza percentage unavailable; preserving original screenshot")
+                }
+                val decorated = try {
+                    decorateModelPlazaScreenshot(original, percentageBytes, options.imageStyle)
+                } catch (error: IllegalArgumentException) {
+                    // 有效样式仍可能对当前图片产生超限画布，只省略图片，不丢失模型指标。
+                    WebHookDebug.log("[WebHook] Model Plaza image composition rejected; omitting image: ${error.message}")
+                    return null
+                }
+                if (decorated.size.toLong() > maxScreenshotBytes) {
+                    WebHookDebug.log("[WebHook] Decorated Model Plaza screenshot exceeds max_screenshot_bytes; omitting image")
+                    null
+                } else {
+                    decorated.also { bytes -> validateScreenshotSize(bytes.size, maxScreenshotBytes) }
+                }
             } catch (_: TimeoutError) {
                 // 图表存在但不可见时只让该模型图片缺失，其它字段和模型照常返回。
                 null
             }
+        }
+
+        private fun modelPlazaPercentage(
+            page: Page,
+            card: Locator,
+            options: ModelPlazaCollectorOptions
+        ): Locator? {
+            val selector = options.percentageSelector
+            val candidates = if (selector.startsWith("/") || selector.startsWith("xpath=/")) {
+                page.locator(normalizeSelector(selector))
+            } else {
+                card.locator(normalizeSelector(selector))
+            }
+            return candidates.firstOrNullIfPresent()?.takeIf { percentage -> percentage.isVisible() }
         }
 
         private fun modelPlazaSparkline(card: Locator, options: ModelPlazaCollectorOptions): Locator? {

@@ -43,7 +43,8 @@ internal object ModelPlazaRequestAction {
         "model_card_selector",
         "model_name_selector",
         "performance_selector",
-        "sparkline_selector"
+        "sparkline_selector",
+        "percentage_selector"
     )
 
     private val throughputRegex = Regex(

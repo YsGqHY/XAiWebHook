@@ -299,7 +299,8 @@ internal class ModelPlazaRequestActionTest {
         assertEquals("gpt", browserAction.params["search_pattern"])
         assertEquals(100L, browserAction.params["search_wait_ms"])
         // 未显式覆盖时不下发选择器，由采集器统一使用内置默认值。
-        listOf("search_selector", "model_card_selector", "model_name_selector", "performance_selector", "sparkline_selector")
+        listOf("search_selector", "model_card_selector", "model_name_selector", "performance_selector", "sparkline_selector",
+            "percentage_selector")
             .forEach { key -> assertFalse(browserAction.params.containsKey(key), key) }
         val parts = ((browserAction.params["screenshot"] as Map<*, *>)["parts"] as List<*>)
         assertEquals(1, parts.size)
@@ -312,11 +313,13 @@ internal class ModelPlazaRequestActionTest {
         assertEquals("https://example.invalid", spec.auth?.localStorage?.origin)
 
         val overridden = ModelPlazaRequestAction.buildBrowserAction(
-            action.copy(params = mapOf("model_card_selector" to ".card", "sparkline_selector" to ".chart")),
+            action.copy(params = mapOf("model_card_selector" to ".card", "sparkline_selector" to ".chart",
+                "percentage_selector" to ".percentage")),
             context, config.modelPlaza, "gpt", "test-only-token"
         )
         assertEquals(".card", overridden.params["model_card_selector"])
         assertEquals(".chart", overridden.params["sparkline_selector"])
+        assertEquals(".percentage", overridden.params["percentage_selector"])
         assertFalse(overridden.params.containsKey("search_wait_ms"))
 
         assertFailsWith<IllegalArgumentException> {

@@ -3,9 +3,13 @@ package kim.hhhhhy.x.webhook.action
 import com.microsoft.playwright.PlaywrightException
 import com.microsoft.playwright.TimeoutError
 import com.sun.net.httpserver.HttpServer
-import java.awt.Color
+import kim.hhhhhy.x.webhook.api.XAiWebHookRequestImageApi
+import kim.hhhhhy.x.webhook.config.RequestImageConfigRuntime
+import kim.hhhhhy.x.webhook.config.RequestImageOutputConfig
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.net.InetSocketAddress
+import java.nio.file.Path
 import javax.imageio.ImageIO
 import kim.hhhhhy.x.webhook.config.ActionConfig
 import kim.hhhhhy.x.webhook.config.BrowserConfig
@@ -14,6 +18,7 @@ import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -21,8 +26,11 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 internal class ModelPlazaBrowserTest {
+    @TempDir
+    lateinit var imageConfigDirectory: Path
+
     @Test
-    fun `dynamic overlapping cards should produce their own metrics and clipped PNGs`() = runBlocking {
+    fun `dynamic overlapping cards should use each models exact percentage XPath`() = runBlocking {
         withFixture { action, context ->
             val results = WebPageScreenshotAction.collectModelPlazaRequests(
                 action, context, listOf("gpt-4", "gpt-4-turbo", "gpt-no-metrics")
@@ -35,16 +43,24 @@ internal class ModelPlazaBrowserTest {
             assertNull(results[2].throughputText)
             assertNull(results[2].latencyText)
             assertNull(results[2].screenshot)
-            for (index in 0..1) {
-                val bytes = assertNotNull(results[index].screenshot)
-                val image = ImageIO.read(ByteArrayInputStream(bytes))
-                assertEquals(100, image.width)
-                assertTrue(image.height in 20..21)
-                val expected = if (index == 0) Color(0, 128, 0) else Color.BLUE
-                assertEquals(expected.rgb, image.getRGB(50, 10))
+            // 直接截取每张卡片的图表和百分比元素，只校验合成尺寸，不比较浏览器抗锯齿颜色。
+            for (result in results.take(2)) {
+                val card = "[data-model='${result.modelName}']"
+                val original = captureFixtureImage(action, context, "$card .sparkline")
+                val percentage = captureFixtureImage(action, context, "$card .percentage")
+                val image = decode(assertNotNull(result.screenshot))
+                assertDimensionsWithMargins(image, original.width + percentage.width + 12,
+                    maxOf(original.height + 6, percentage.height))
             }
-            // fixture 搜索被异步渲染更新，collector 等待后才读取，截图严格为 aria-label 元素区域。
         }
+    }
+
+    private fun decode(bytes: ByteArray): BufferedImage =
+        assertNotNull(ByteArrayInputStream(bytes).use { input -> ImageIO.read(input) })
+
+    private fun assertDimensionsWithMargins(image: BufferedImage, contentWidth: Int, contentHeight: Int) {
+        assertEquals(contentWidth + ((contentWidth + 19) / 20) * 2, image.width)
+        assertEquals(contentHeight + ((contentHeight + 99) / 100) * 2, image.height)
     }
 
     @Test
@@ -135,6 +151,149 @@ internal class ModelPlazaBrowserTest {
         }
     }
 
+    @Test
+    fun `percentage outside the sparkline should be captured by its exact card XPath`() = runBlocking {
+        withFixture { action, context ->
+            val result = WebPageScreenshotAction.collectModelPlazaRequests(
+                action, context, listOf("gpt-sibling")
+            ).single()
+            val original = captureFixtureImage(action, context, "[data-model='gpt-sibling'] .sparkline")
+            val percentage = captureFixtureImage(action, context, "[data-model='gpt-sibling'] .percentage")
+            val decorated = decode(assertNotNull(result.screenshot))
+            assertEquals("10.0 t/s", result.throughputText)
+            assertEquals("2s", result.latencyText)
+            assertDimensionsWithMargins(decorated, original.width + percentage.width + 12,
+                maxOf(original.height + 6, percentage.height))
+        }
+    }
+
+    @Test
+    fun `card relative XPath and absolute XPath overrides should capture the percentage`() = runBlocking {
+        withFixture { action, context ->
+            val absoluteXPath = "//*[@id=\"app\"]/div[2]/div[2]/main/div/div[3]/div[1]/div[2]/div[2]/div/span[3]/span"
+            for (selector in listOf(absoluteXPath, "./div[2]/div[2]/div/span[3]/span")) {
+                val result = WebPageScreenshotAction.collectModelPlazaRequests(
+                    action.copy(params = action.params + ("percentage_selector" to selector)),
+                    context, listOf("gpt-4-turbo")
+                ).single()
+                val original = captureFixtureImage(action, context, "[data-model='gpt-4-turbo'] .sparkline")
+                val percentage = captureFixtureImage(action, context, "[data-model='gpt-4-turbo'] .percentage")
+                val decorated = decode(assertNotNull(result.screenshot))
+                assertDimensionsWithMargins(decorated, original.width + percentage.width + 12,
+                    maxOf(original.height + 6, percentage.height))
+            }
+        }
+    }
+
+    @Test
+    fun `missing or invalid percentage selectors should retain the original image`() = runBlocking {
+        withFixture { action, context ->
+            val original = captureFixtureImage(action, context, "[data-model='gpt-4'] .sparkline")
+            for (selector in listOf(".missing", "[")) {
+                val result = WebPageScreenshotAction.collectModelPlazaRequests(
+                    action.copy(params = action.params + ("percentage_selector" to selector)), context, listOf("gpt-4")
+                ).single()
+                val screenshot = decode(assertNotNull(result.screenshot))
+                assertEquals("81.46 t/s", result.throughputText)
+                assertEquals("19.5s", result.latencyText)
+                assertDimensionsWithMargins(screenshot, original.width, original.height)
+            }
+        }
+    }
+
+    @Test
+    fun `hidden percentage should preserve the original without a fabricated value`() = runBlocking {
+        withFixture(html = fixtureHtml().replace("class=\"percentage\"", "class=\"percentage\" hidden")) { action, context ->
+            val original = captureFixtureImage(action, context, "[data-model='gpt-4'] .sparkline")
+            val result = WebPageScreenshotAction.collectModelPlazaRequests(action, context, listOf("gpt-4")).single()
+            val screenshot = decode(assertNotNull(result.screenshot))
+            assertDimensionsWithMargins(screenshot, original.width, original.height)
+            assertEquals("81.46 t/s", result.throughputText)
+        }
+    }
+
+    @Test
+    fun `oversized original or decorated image should omit only its image and retain metrics`() = runBlocking {
+        withFixture { action, context ->
+            val decorated = assertNotNull(WebPageScreenshotAction.collectModelPlazaRequests(action, context, listOf("gpt-4"))
+                .single().screenshot)
+            for (limit in listOf(decorated.size.toLong() - 1L, 1L)) {
+                val limitedContext = context.copy(config = context.config.copy(
+                    browser = context.config.browser.copy(maxScreenshotBytes = limit)
+                ))
+                val results = WebPageScreenshotAction.collectModelPlazaRequests(
+                    action, limitedContext, listOf("gpt-4", "claude-opus-5")
+                )
+                assertNull(results[0].screenshot)
+                assertEquals("81.46 t/s", results[0].throughputText)
+                assertEquals("19.5s", results[0].latencyText)
+                assertEquals("12.5 t/s", results[1].throughputText)
+                if (limit > 1L) assertNotNull(results[1].screenshot) else assertNull(results[1].screenshot)
+            }
+        }
+    }
+
+    @Test
+    fun `valid canvas limit should omit only images and preserve all model metrics`() = runBlocking {
+        withFixture { action, context ->
+            val updated = XAiWebHookRequestImageApi.write(XAiWebHookRequestImageApi.read().copy(
+                output = RequestImageOutputConfig(maxPixels = 1)
+            ))
+            assertTrue(updated.success, updated.error)
+            val results = WebPageScreenshotAction.collectModelPlazaRequests(
+                action, context, listOf("gpt-4", "gpt-4-turbo")
+            )
+            assertTrue(results.all { it.screenshot == null })
+            assertEquals("81.46 t/s", results[0].throughputText)
+            assertEquals("19.5s", results[0].latencyText)
+            assertEquals("50.0 tps", results[1].throughputText)
+        }
+    }
+
+    @Test
+    fun `disabling the percentage should skip even an invalid percentage selector`() = runBlocking {
+        withFixture { action, context ->
+            val current = XAiWebHookRequestImageApi.read()
+            assertTrue(XAiWebHookRequestImageApi.write(current.copy(
+                percentage = current.percentage.copy(enabled = false)
+            )).success)
+            val result = WebPageScreenshotAction.collectModelPlazaRequests(
+                action.copy(params = action.params + ("percentage_selector" to "[")), context, listOf("gpt-4")
+            ).single()
+            val original = captureFixtureImage(action, context, "[data-model='gpt-4'] .sparkline")
+            assertDimensionsWithMargins(decode(assertNotNull(result.screenshot)), original.width + 6, original.height + 6)
+            assertEquals("81.46 t/s", result.throughputText)
+        }
+    }
+
+    @Test
+    fun `updates while navigating should affect only the next batch of model images`() = runBlocking {
+        withFixture(onPageRequest = {
+            runBlocking {
+                val updated = XAiWebHookRequestImageApi.update("margin.left_percent", "20")
+                check(updated.success) { updated.error.orEmpty() }
+            }
+        }) { action, context ->
+            val models = listOf("gpt-4", "gpt-4-turbo")
+            val first = WebPageScreenshotAction.collectModelPlazaRequests(action, context, models)
+            assertEquals(20.0, XAiWebHookRequestImageApi.read().margin.leftPercent)
+            val next = WebPageScreenshotAction.collectModelPlazaRequests(action, context, models)
+            for (index in models.indices) {
+                val card = "[data-model='${models[index]}']"
+                val original = captureFixtureImage(action, context, "$card .sparkline")
+                val percentage = captureFixtureImage(action, context, "$card .percentage")
+                val contentWidth = original.width + percentage.width + 12
+                val contentHeight = maxOf(original.height + 6, percentage.height)
+                val firstImage = decode(assertNotNull(first[index].screenshot))
+                val nextImage = decode(assertNotNull(next[index].screenshot))
+                assertDimensionsWithMargins(firstImage, contentWidth, contentHeight)
+                assertEquals(contentWidth + (contentWidth + 4) / 5 + (contentWidth + 19) / 20, nextImage.width)
+                assertEquals(firstImage.height, nextImage.height)
+                assertTrue(nextImage.width > firstImage.width)
+            }
+        }
+    }
+
     private fun shortTimeout(action: ActionConfig, key: String, selector: String): ActionConfig {
         val screenshot = action.params["screenshot"] as Map<*, *>
         val part = (screenshot["parts"] as List<*>).single() as Map<*, *>
@@ -148,6 +307,8 @@ internal class ModelPlazaBrowserTest {
 
     private suspend fun withFixture(
         redirect: Redirect = Redirect.NONE,
+        html: String = fixtureHtml(),
+        onPageRequest: (() -> Unit)? = null,
         test: suspend (ActionConfig, ExecutionContext) -> Unit
     ): Unit {
         assumeTrue(System.getenv("XAI_WEBHOOK_BROWSER_IT") == "true", "Requires opt-in local Playwright browser")
@@ -159,12 +320,13 @@ internal class ModelPlazaBrowserTest {
                 exchange.close()
             } else {
                 // CLIENT 模拟前端路由守卫：未登录时用 history API 改写到 /login，不产生新的文档请求。
-                val html = if (redirect == Redirect.CLIENT) {
+                onPageRequest?.invoke()
+                val responseHtml = if (redirect == Redirect.CLIENT) {
                     "<!doctype html><html><body><script>history.replaceState(null, '', '/login?redirect=/model-plaza')</script></body></html>"
                 } else {
-                    fixtureHtml()
+                    html
                 }
-                val bytes = html.toByteArray(Charsets.UTF_8)
+                val bytes = responseHtml.toByteArray(Charsets.UTF_8)
                 exchange.responseHeaders.add("Content-Type", "text/html; charset=UTF-8")
                 exchange.sendResponseHeaders(200, bytes.size.toLong())
                 exchange.responseBody.use { it.write(bytes) }
@@ -200,36 +362,91 @@ internal class ModelPlazaBrowserTest {
         WebPageScreenshotAction.reset()
         WebPageScreenshotAction.open()
         try {
+            RequestImageConfigRuntime.start(imageConfigDirectory.toFile(), {}, {})
             test(action, context)
         } finally {
+            RequestImageConfigRuntime.resetForTest()
             WebPageScreenshotAction.reset()
             server.stop(0)
         }
     }
 
+
+    private suspend fun captureFixtureImage(
+        action: ActionConfig,
+        context: ExecutionContext,
+        selector: String
+    ): BufferedImage {
+        val screenshot = action.params["screenshot"] as Map<*, *>
+        val part = (screenshot["parts"] as List<*>).single() as Map<*, *>
+        val elementAction = action.copy(params = action.params + (
+            "screenshot" to mapOf("parts" to listOf(part + ("selector" to selector)))
+        ))
+        return decode(WebPageScreenshotAction.capture(elementAction, context))
+    }
+
     private fun fixtureHtml(): String = """
-        <!doctype html><html><body>
-          <input id="search" type="search">
-          <div class="card"><h3>gpt-4-turbo</h3><div class="performance">—</div>
-            <div aria-label="近 5 个时段成功率，最低 80.0%" style="width:100px;height:20px;background:blue"></div>
-          </div>
-          <div class="card"><h3>gpt-4</h3><div class="performance">—</div>
-            <div aria-label="近 5 个时段成功率，最低 0.0%" style="width:100px;height:20px;background:green"></div>
-            <div class="hidden-sparkline" style="display:none;width:100px;height:20px"></div>
-          </div>
-          <div class="card"><h3>gpt-no-metrics</h3><p>暂无数据</p></div>
-          <div class="card"><h3>Claude Opus 5</h3><div>claude-opus-5</div><div class="performance">—</div>
-            <div role="img" aria-label="近 3 个时段成功率，最低 50.0%" style="width:100px;height:20px;background:red"></div>
-          </div>
+        <!doctype html><html><head><style>
+          body { font:16px/20px sans-serif; margin:8px; }
+          #search { display:block; height:24px; box-sizing:border-box; }
+          h3 { font:16px/20px sans-serif; height:20px; margin:0; }
+          .performance { height:20px; line-height:20px; }
+          .sparkline { position:relative; display:inline-block; width:100px; height:20px; vertical-align:top; }
+          .percentage { position:absolute; right:0; top:2px; display:inline-block; width:30px; height:16px;
+            color:white; background:transparent; font:10px/16px monospace; text-align:right; }
+          .percentage[hidden] { display:none !important; }
+        </style></head><body>
+          <div id="app"><div></div><div><div></div><div><main><div>
+            <div><div><div><input id="search" type="search"></div></div></div>
+            <div></div>
+            <div>
+              <div class="card" data-model="gpt-4-turbo">
+                <div><h3>gpt-4-turbo</h3></div>
+                <div><div></div><div><div class="performance">
+                  <span class="metrics" data-throughput="50.0 tps" data-latency="1250ms">—</span><span></span>
+                  <span class="sparkline" role="img" aria-label="近 5 个时段成功率，最低 80.0%" style="background:blue">
+                    <span class="percentage">88.8%</span>
+                  </span>
+                </div></div></div>
+              </div>
+              <div class="card" data-model="gpt-4">
+                <div><h3>gpt-4</h3></div>
+                <div><div></div><div><div class="performance">
+                  <span class="metrics" data-throughput="81.46 t/s" data-latency="19.5s">—</span><span></span>
+                  <span class="sparkline" role="img" aria-label="近 5 个时段成功率，最低 0.0%" style="background:green">
+                    <span class="percentage" style="width:36px">99.7%</span>
+                  </span>
+                </div></div></div>
+                <div class="hidden-sparkline" style="display:none;width:100px;height:20px"></div>
+              </div>
+              <div class="card" data-model="gpt-no-metrics"><div><h3>gpt-no-metrics</h3><p>暂无数据</p></div></div>
+              <div class="card" data-model="claude-opus-5">
+                <div><h3>Claude Opus 5</h3><p>claude-opus-5</p></div>
+                <div><div></div><div><div class="performance">
+                  <span class="metrics" data-throughput="12.5 t/s" data-latency="850ms">—</span><span></span>
+                  <span class="sparkline" role="img" aria-label="近 3 个时段成功率，最低 50.0%" style="background:red"></span>
+                </div></div></div>
+              </div>
+              <div class="card" data-model="gpt-sibling">
+                <div><h3>gpt-sibling</h3></div>
+                <div><div></div><div><div class="performance">
+                  <span class="metrics">10.0 t/s 2s</span><span></span>
+                  <span style="display:inline-flex;gap:6px;align-items:center">
+                    <i class="sparkline" role="img" aria-label="近 5 个时段成功率，最低 0.0%" style="background:orange"></i>
+                    <span class="percentage" style="position:static;color:green;background:white">99.7%</span>
+                  </span>
+                </div></div></div>
+              </div>
+            </div>
+          </div></main></div></div></div>
           <script>
             document.querySelector('#search').addEventListener('input', (event) => {
               setTimeout(() => {
-                // 模拟前端把搜索词同步到地址栏：仍在 /model-plaza，只是追加了查询参数。
+                // 异步更新指标和搜索地址，不替换图表或百分比 DOM。
                 history.replaceState(null, '', '/model-plaza?q=' + encodeURIComponent(event.target.value));
-                const rows = document.querySelectorAll('.performance');
-                rows[0].textContent = '50.0 tps 1250ms';
-                rows[1].textContent = '81.46 t/s 19.5s';
-                rows[2].textContent = '12.5 t/s 850ms 99.0%';
+                document.querySelectorAll('.metrics[data-throughput]').forEach((row) => {
+                  row.textContent = row.dataset.throughput + ' ' + row.dataset.latency;
+                });
               }, 200);
             });
           </script>
