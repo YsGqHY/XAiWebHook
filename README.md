@@ -543,14 +543,16 @@ output:
 
 未能取得百分比元素时，沿用原有降级：保留原图及外边距，不伪造左侧数值或增加外框；主动关闭 `percentage.enabled` 时，边框开关仍可独立生效。图表/百分比选择器、浏览器视口、认证和超时仍使用主配置及动作参数，独立图片配置只负责合成。
 
-**校验与失败处理**：错误类型、越界数字、NaN/Infinity、非法颜色、未知/重复字段、不支持的版本、空/多文档 YAML 或超过 64 KiB 的文件都会被拒绝；缺省字段采用内置默认值，显式 `null` 无效。候选配置整份通过校验后才替换有效值，不会只应用其中几个字段。运行中修改无效或文件被删除时保留上一份有效值，控制台记录原因，`/xwebhook image-config` 和 `status` 可查看错误；修复并保存后自动恢复。新进程首次启动已有无效文件时使用内置有效默认值，同时保留原文件供修复；同一进程内重新启用插件时，仍会保留最后有效样式、修订号和最近成功时间。
+**校验与失败处理**：错误类型、越界数字、NaN/Infinity、非法颜色、未知/重复字段、不支持的版本、空/多文档 YAML 或超过 64 KiB 的文件都会被拒绝；缺省字段采用内置默认值，显式 `null` 无效。候选配置整份通过校验后才替换有效值，不会只应用其中几个字段。运行中修改无效或文件被删除时保留上一份有效值，控制台记录原因，`/xwebhook imageconfig` 和 `status` 可查看错误；修复并保存后自动恢复。新进程首次启动已有无效文件时使用内置有效默认值，同时保留原文件供修复；同一进程内重新启用插件时，仍会保留最后有效样式、修订号和最近成功时间。
 
 **读写方式**：
 
+mirai-console 子命令名禁止包含 `-`，以下命令使用无连字符名称；不能把旧的连字符名称保留为别名，否则仍会导致插件启动失败。
+
 - 直接编辑配置文件：自动检查并生效，不必执行主配置 `reload`。
-- `/xwebhook image-config`：读取当前有效 YAML、文件路径、修订号、监听状态与最近错误。
-- `/xwebhook image-config-set margin.left_percent 8`：校验单项更新、保存到文件并立即应用。颜色示例：`/xwebhook image-config-set border.color #22C55E`。
-- `/xwebhook image-config-reload`：立即从磁盘重载图片配置，不重启服务。
+- `/xwebhook imageconfig`：读取当前有效 YAML、文件路径、修订号、监听状态与最近错误。
+- `/xwebhook imageconfigset margin.left_percent 8`：校验单项更新、保存到文件并立即应用。颜色示例：`/xwebhook imageconfigset border.color #22C55E`。
+- `/xwebhook imageconfigreload`：立即从磁盘重载图片配置，不重启服务。
 
 管理命令继承 `kim.hhhhhy.x.webhook:admin` 权限。代码写入先校验、写同目录临时文件并刷新，然后原子替换配置文件；成功落盘才更新内存。校验/写入失败时文件和当前有效值保持原样；文件系统不支持原子替换时明确报错，不退化为直接覆盖。单项更新在锁内完成读改写，避免并发修改不同字段时互相覆盖。若磁盘文件已经无效或不可读取，单项更新会拒绝执行，保留用户尚待修复的内容；请先修复文件，或通过 `write`/`writeYaml` 明确整体替换。`write` 和 `update` 会重新生成带默认说明的规范 YAML，自定义注释会被替换；`writeYaml` 保留调用方提供的原文及注释。
 
@@ -586,9 +588,9 @@ val updated = XAiWebHookRequestImageApi.update("border.color", "#22C55E")
 | --- | --- |
 | `/xwebhook reload` | 重载主配置与图片配置，并重启 WebHook 服务 |
 | `/xwebhook status` | 查看服务、路由、浏览器、图片配置修订号和最近错误 |
-| `/xwebhook image-config` | 查看当前有效图片配置与自动加载状态 |
-| `/xwebhook image-config-set <字段路径> <值>` | 校验、保存并立即应用单项图片配置 |
-| `/xwebhook image-config-reload` | 只重载图片配置，不重启 HTTP 或浏览器 |
+| `/xwebhook imageconfig` | 查看当前有效图片配置与自动加载状态 |
+| `/xwebhook imageconfigset <字段路径> <值>` | 校验、保存并立即应用单项图片配置 |
+| `/xwebhook imageconfigreload` | 只重载图片配置，不重启 HTTP 或浏览器 |
 
 主要权限：
 

@@ -73,7 +73,7 @@ narrator: NarraFork
 - 新增 [src/main/kotlin/kim/hhhhhy/x/webhook/config/RequestImageConfig.kt](src/main/kotlin/kim/hhhhhy/x/webhook/config/RequestImageConfig.kt)：不可变样式、字段范围、颜色和十进制边距计算、严格 YAML 编解码。
 - 新增 [src/main/kotlin/kim/hhhhhy/x/webhook/config/RequestImageConfigStore.kt](src/main/kotlin/kim/hhhhhy/x/webhook/config/RequestImageConfigStore.kt)：同锁读改写、原子持久化、内容指纹稳定检测、错误去重及修复恢复；原子引用发布有效状态。
 - 新增 [src/main/kotlin/kim/hhhhhy/x/webhook/api/XAiWebHookRequestImageApi.kt](src/main/kotlin/kim/hhhhhy/x/webhook/api/XAiWebHookRequestImageApi.kt)：只读快照/YAML/状态和协程 write、writeYaml、update、reload 接口。
-- 插件启停管理监听协程，新增 image-config、image-config-set、image-config-reload 命令；均继承原 admin 权限，状态显示最近配置错误。
+- 插件启停管理监听协程，新增 imageconfig、imageconfigset、imageconfigreload 命令；均继承原 admin 权限，状态显示最近配置错误。原带连字符名称在 2026-10-14 的启动问题修复中移除，详见文末。
 - 图片合成使用配置快照；参数、画布像素和截图字节限制失败不影响其他模型指标。
 - 补充配置、文件监控、公开 API、合成和本地浏览器回归；README 说明格式、默认值、读写与回退行为。
 
@@ -102,3 +102,13 @@ narrator: NarraFork
 ## 后续建议
 
 在已部署的 mirai 测试环境中，修改 `margin.left_percent` 后发送一次请求查询，再保存非法颜色并查看配置错误，确认日志与管理员反馈符合运维习惯。主配置本身的失败回退策略未改动，不属于图片配置热重载范围。
+
+## 2026-10-14：修复控制台命令注册失败
+
+用户提供了 2026-10-14 13:42:44 的启动堆栈：mirai-console 的 `CommandReflector.checkNames` 抛出 `'-' is forbidden in command name.`。此前的图片/配置测试并未执行命令声明反射校验，因此全量构建通过仍不能证明控制台注册成功。
+
+- 修复：子命令改为 `/xwebhook imageconfig`、`/xwebhook imageconfigset`、`/xwebhook imageconfigreload`，不保留非法别名；同步 README、两个默认 YAML 及 YAML 序列化注释。
+- 回归：[src/test/kotlin/kim/hhhhhy/x/webhook/command/XAiWebHookCommandTest.kt](src/test/kotlin/kim/hhhhhy/x/webhook/command/XAiWebHookCommandTest.kt) 不初始化插件，而是读取实际生产类的全部 7 个命令方法，并调用已锁定版本 mirai-console 2.16.0 注册流程使用的接收者、修饰符和名称校验；旧的三个连字符名称作为负向用例，确认仍抛出同一种声明异常。
+- 验证：命令、配置编解码、文件存储和公开 API 共 45 项相关测试通过，0 失败、0 错误、0 跳过；`./gradlew.bat buildPlugin` 通过。包内命令类包含三个新名称、不含旧的 image-config 字符串，默认图片配置资源与源码一致。
+- 范围：本次没有重跑此前的全部浏览器用例，也没有启动生产机器人；测试覆盖的是用户堆栈中的真实 SDK 声明校验，未模拟完整控制台启动。测试中检查 protected 注解及私有校验方法，仅限已锁定 SDK 版本，不进入生产实现。
+- 部署：替换插件 JAR 后重启 mirai-console 一次。修复不改变图片配置字段、默认值或后续 YAML 热重载行为。此次修复未自动创建提交。
