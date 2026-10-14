@@ -76,7 +76,7 @@ public object XAiWebHookCommand : CompositeCommand(
         sendMessage(status)
     }
 
-    @SubCommand("image-config")
+    @SubCommand("imageconfig")
     @Description("查看请求图片的有效配置与自动加载状态")
     public suspend fun CommandSender.imageConfig(): Unit {
         val status = XAiWebHookRequestImageApi.status()
@@ -91,13 +91,13 @@ public object XAiWebHookCommand : CompositeCommand(
         }.trimEnd())
     }
 
-    @SubCommand("image-config-set")
+    @SubCommand("imageconfigset")
     @Description("校验、保存并立即应用一项图片配置，例如 margin.left_percent 8")
     public suspend fun CommandSender.setImageConfig(key: String, value: String): Unit {
         sendMessage(imageConfigFeedback(XAiWebHookRequestImageApi.update(key, value)))
     }
 
-    @SubCommand("image-config-reload")
+    @SubCommand("imageconfigreload")
     @Description("只重载 request_image.yml，不重启 HTTP 或浏览器")
     public suspend fun CommandSender.reloadImageConfig(): Unit {
         sendMessage(imageConfigFeedback(XAiWebHookRequestImageApi.reload()))

@@ -497,7 +497,7 @@ internal object RequestImageConfigCodec {
     internal fun render(style: RequestImageStyle): String = buildString {
         append("# XAiWebHook 请求记录图片样式配置（独立于 webhook_config.yml）\n")
         append("# 修改保存后约 1~2 秒自动生效，无需重启插件或执行 /xwebhook reload。\n")
-        append("# 无效配置不会被应用：继续使用上一份有效样式，并在日志与 /xwebhook image-config 中显示错误。\n")
+        append("# 无效配置不会被应用：继续使用上一份有效样式，并在日志与 /xwebhook imageconfig 中显示错误。\n")
         append("# 字段可按需省略（至少保留一个字段，如 version: 1）；省略时使用下方默认值，不允许未知字段、重复字段或 null。\n")
         append("# 颜色必须加引号，格式为 \"#RRGGBB\"（不透明）或 \"#AARRGGBB\"（alpha 在前，00 为全透明）。\n")
         append("\n")

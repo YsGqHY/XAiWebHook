@@ -651,7 +651,7 @@ outgoing:
           # //*[@id="app"]/div[2]/div[2]/main/div/div[3]/div[1]/div[2]/div[2]/div/span[3]/span；
           # 采集后在原图外加边框，并把该元素的截图复制到边框左侧；支持 CSS、卡片相对 XPath 或完整页面 XPath
           # 边框、百分比副本、间距、四侧留白和背景在同目录独立的 request_image.yml 中配置，保存后自动热重载；
-          # 图片配置无效时保留上一份有效样式，/xwebhook image-config 可查看错误，不必重启服务
+          # 图片配置无效时保留上一份有效样式，/xwebhook imageconfig 可查看错误，不必重启服务
           # percentage_selector: "./div[2]/div[2]/div/span[3]/span"
           # 搜索后等待指标渲染的上限（毫秒），默认 5000，范围 0-120000；先稳定 500 毫秒，
           # 任一卡片出现吞吐即提前继续；全部无数据时等满上限后按字段输出“暂无数据”
