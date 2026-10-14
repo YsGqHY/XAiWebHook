@@ -646,6 +646,13 @@ outgoing:
           # 卡片内成功率图表，默认依次尝试 aria-label 以“近 5 个时段成功率”开头、包含“成功率”，
           # 最后取指标行内的 role=img 图表（兼容英文界面）；配置后优先使用该值
           # sparkline_selector: "[aria-label^='近 5 个时段成功率']"
+          # 成功率右侧百分比元素，默认按每张卡片的相对 XPath
+          # ./div[2]/div[2]/div/span[3]/span 对应页面完整路径
+          # //*[@id="app"]/div[2]/div[2]/main/div/div[3]/div[1]/div[2]/div[2]/div/span[3]/span；
+          # 采集后在原图外加边框，并把该元素的截图复制到边框左侧；支持 CSS、卡片相对 XPath 或完整页面 XPath
+          # 边框、百分比副本、间距、四侧留白和背景在同目录独立的 request_image.yml 中配置，保存后自动热重载；
+          # 图片配置无效时保留上一份有效样式，/xwebhook image-config 可查看错误，不必重启服务
+          # percentage_selector: "./div[2]/div[2]/div/span[3]/span"
           # 搜索后等待指标渲染的上限（毫秒），默认 5000，范围 0-120000；先稳定 500 毫秒，
           # 任一卡片出现吞吐即提前继续；全部无数据时等满上限后按字段输出“暂无数据”
           # search_wait_ms: 5000

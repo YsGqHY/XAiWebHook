@@ -4,6 +4,7 @@ import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
 import kim.hhhhhy.x.webhook.action.WebPageScreenshotAction
 import kim.hhhhhy.x.webhook.action.codex.CodexRadarAction
 import kim.hhhhhy.x.webhook.command.XAiWebHookCommand
+import kim.hhhhhy.x.webhook.config.RequestImageConfigRuntime
 import kim.hhhhhy.x.webhook.config.WebHookConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.listener.WebHookEventListener
@@ -52,6 +53,11 @@ public object XAiWebHook : KotlinPlugin(
         WebHookDebug.log("[XAiWebHook] 插件启动中...")
         WebHookDebug.log("[XAiWebHook] 正在加载配置文件...")
         WebHookConfig.load()
+        RequestImageConfigRuntime.start(
+            directory = configFolder,
+            onError = { message -> logger.error("[请求图片配置] $message") },
+            onApplied = { message -> logger.info("[请求图片配置] $message") }
+        )
         CodexRadarAction.startRefreshScheduler(WebHookConfig.current)
         WebHookDebug.log("[XAiWebHook] 正在注册 outgoing 冷却绕过权限...")
         PERMISSION_COOLDOWN_BYPASS
@@ -69,6 +75,7 @@ public object XAiWebHook : KotlinPlugin(
 
     public override fun onDisable(): Unit {
         WebHookDebug.log("[XAiWebHook] 插件正在停止...")
+        RequestImageConfigRuntime.close()
         WebHookDebug.log("[XAiWebHook] 正在停止 HTTP 服务...")
         WebHookServer.stop()
         WebHookDebug.log("[XAiWebHook] 正在清理 outgoing 冷却状态...")

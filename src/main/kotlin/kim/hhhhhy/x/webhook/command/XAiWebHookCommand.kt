@@ -3,6 +3,8 @@ package kim.hhhhhy.x.webhook.command
 import kim.hhhhhy.x.webhook.XAiWebHook
 import kim.hhhhhy.x.webhook.action.WebHookActionExecutor
 import kim.hhhhhy.x.webhook.action.WebPageScreenshotAction
+import kim.hhhhhy.x.webhook.api.RequestImageConfigUpdateResult
+import kim.hhhhhy.x.webhook.api.XAiWebHookRequestImageApi
 import kim.hhhhhy.x.webhook.config.WebHookConfig
 import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.listener.WebHookEventListener
@@ -18,10 +20,11 @@ public object XAiWebHookCommand : CompositeCommand(
     parentPermission = XAiWebHook.PERMISSION_ADMIN
 ) {
     @SubCommand("reload")
-    @Description("重载 webhook_config.yml 并重启 WebHook 服务")
+    @Description("重载主配置和图片配置，并重启 WebHook 服务")
     public suspend fun CommandSender.reload(): Unit {
         WebHookDebug.log("[XAiWebHook] [命令] 收到 reload 命令，开始重载配置...")
         WebHookConfig.reload()
+        val imageConfigResult = XAiWebHookRequestImageApi.reload()
         WebHookActionExecutor.reload()
         WebHookEventListener.clearCooldowns()
         WebHookServer.restart(WebHookConfig.current)
@@ -44,6 +47,7 @@ public object XAiWebHookCommand : CompositeCommand(
             appendLine("server: ${if (WebHookServer.running) "running" else "stopped"}")
             appendLine("browser: ${browserStatus(config.browser.enabled, config.browser.engine, config.browser.channel)}")
             if (serverError != null) appendLine("server error: $serverError")
+            appendLine(imageConfigFeedback(imageConfigResult))
         }
         sendMessage(feedback.trimEnd())
     }
@@ -53,6 +57,7 @@ public object XAiWebHookCommand : CompositeCommand(
     public suspend fun CommandSender.status(): Unit {
         WebHookDebug.log("[XAiWebHook] [命令] 收到 status 命令查询")
         val config = WebHookConfig.current
+        val imageConfigStatus = XAiWebHookRequestImageApi.status()
         val status = buildString {
             appendLine("XAiWebHook 状态:")
             appendLine("server: ${if (WebHookServer.running) "running" else "stopped"}")
@@ -65,8 +70,45 @@ public object XAiWebHookCommand : CompositeCommand(
             appendLine("server error: ${WebHookServer.lastError ?: "none"}")
             appendLine("browser error: ${WebPageScreenshotAction.lastError ?: "none"}")
             appendLine("browser query error: ${WebPageScreenshotAction.lastQueryError ?: "none"}")
+            appendLine("request image config: revision=${imageConfigStatus.revision}, watching=${imageConfigStatus.watching}")
+            appendLine("request image config error: ${imageConfigStatus.lastError ?: "none"}")
         }
         sendMessage(status)
+    }
+
+    @SubCommand("image-config")
+    @Description("查看请求图片的有效配置与自动加载状态")
+    public suspend fun CommandSender.imageConfig(): Unit {
+        val status = XAiWebHookRequestImageApi.status()
+        sendMessage(buildString {
+            appendLine("请求图片配置（后续生成的图片生效）:")
+            appendLine("file: ${status.filePath ?: "未启动"}")
+            appendLine("revision: ${status.revision}")
+            appendLine("watching: ${status.watching}")
+            appendLine("last loaded: ${status.lastLoadedAtMillis ?: "none"}")
+            appendLine("error: ${status.lastError ?: "none"}")
+            appendLine(XAiWebHookRequestImageApi.readYaml())
+        }.trimEnd())
+    }
+
+    @SubCommand("image-config-set")
+    @Description("校验、保存并立即应用一项图片配置，例如 margin.left_percent 8")
+    public suspend fun CommandSender.setImageConfig(key: String, value: String): Unit {
+        sendMessage(imageConfigFeedback(XAiWebHookRequestImageApi.update(key, value)))
+    }
+
+    @SubCommand("image-config-reload")
+    @Description("只重载 request_image.yml，不重启 HTTP 或浏览器")
+    public suspend fun CommandSender.reloadImageConfig(): Unit {
+        sendMessage(imageConfigFeedback(XAiWebHookRequestImageApi.reload()))
+    }
+
+    private fun imageConfigFeedback(result: RequestImageConfigUpdateResult): String {
+        return if (result.success) {
+            "请求图片配置已应用（revision=${result.revision}），后续生成的图片生效"
+        } else {
+            "请求图片配置更新失败，保留当前有效值（revision=${result.revision}）：${result.error ?: "未知错误"}"
+        }
     }
 
     @SubCommand("模型", "model")
