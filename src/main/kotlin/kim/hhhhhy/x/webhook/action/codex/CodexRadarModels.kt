@@ -22,6 +22,20 @@ internal data class CodexRadarSnapshot(
     val generatedAtText: String,
     val partial: Boolean = false
 ) {
+    /**
+     * 以 model|effort 为行主键把本次结果叠加到旧快照上。
+     *
+     * 逐行缓存的语义：本次解析到的行覆盖旧值，本次缺失（未加载/无数据/解析失败）
+     * 的行沿用旧缓存中的值，避免单条缺失把该行已经缓存过的数据一起抹掉。
+     */
+    fun mergeWith(previous: CodexRadarSnapshot?): CodexRadarSnapshot {
+        if (previous == null) return this
+        return copy(
+            radarScores = mergeScores(previous.radarScores, radarScores),
+            communityScores = mergeScores(previous.communityScores, communityScores)
+        )
+    }
+
     fun summaryText(header: String): String {
         val lines = mutableListOf(header)
         if (partial) {
@@ -40,6 +54,40 @@ internal data class CodexRadarSnapshot(
     }
 
     private fun format(value: Double): String = String.format("%.1f", value)
+
+    private companion object {
+        /** 旧行保持原顺序，新行追加在其后，保证图表与文本输出顺序稳定。 */
+        fun mergeScores(
+            previous: List<CodexRadarScore>,
+            current: List<CodexRadarScore>
+        ): List<CodexRadarScore> {
+            if (previous.isEmpty()) return current
+            if (current.isEmpty()) return previous
+            val currentByKey = current.associateBy { it.key }
+            val previousKeys = previous.mapTo(HashSet(previous.size)) { it.key }
+            val merged = previous.map { score -> currentByKey[score.key] ?: score }
+            return merged + current.filter { it.key !in previousKeys }
+        }
+    }
+}
+
+/** 解析阶段被跳过的一行，用于逐行缓存时说明哪一条没有缓存以及原因。 */
+internal data class CodexRadarSkippedRow(
+    val kind: String,
+    val index: Int,
+    val label: String,
+    val reason: String
+) {
+    fun describe(): String = "$kind 第 ${index + 1} 行“$label”已跳过：$reason"
+}
+
+/** 逐行解析结果：本次成功缓存的有效行 + 被跳过的行。 */
+internal data class CodexRadarParseResult(
+    val scores: List<CodexRadarScore>,
+    val skipped: List<CodexRadarSkippedRow>,
+    val totalRows: Int
+) {
+    val hasSkipped: Boolean get() = skipped.isNotEmpty()
 }
 
 /** Codex Radar 页面抓取、解析或结构校验失败。 */

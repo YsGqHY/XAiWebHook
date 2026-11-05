@@ -398,7 +398,9 @@ internal object CodexRadarAction {
                     CodexRadarCache.write(
                         path = cachePath,
                         pageUrl = spec.pageUrl,
-                        snapshot = snapshot
+                        snapshot = snapshot,
+                        // 逐行缓存：本次未加载/无数据的行沿用旧缓存值，不因单条缺失丢数据
+                        mergeWithExisting = true
                     )
                 }.onFailure { error ->
                     cacheWriteFailed = true
@@ -500,18 +502,39 @@ internal object CodexRadarAction {
             )
         }
         return try {
-            val radarScores = CodexRadarParser.parseRadar(results[0])
-            val communityScores = CodexRadarParser.parseCommunity(results[1])
+            // 逐行解析：单条数据未加载或无数据时只跳过该条，继续处理后面的行。
+            // partial=true（页面步骤超时/未就绪）时进一步放宽到"逐表"：
+            // 某一整张表都没读出来也照常缓存另一张表的数据，缺失部分由旧缓存按行补齐。
+            val radarResult = parseTable("雷达分", partial) {
+                CodexRadarParser.parseRadarRows(results[0])
+            }
+            val communityResult = parseTable("社区体感分", partial) {
+                CodexRadarParser.parseCommunityRows(results[1])
+            }
+            val skipped = radarResult.skipped + communityResult.skipped
+            if (radarResult.scores.isEmpty() && communityResult.scores.isEmpty()) {
+                throw CodexRadarException(
+                    "Codex Radar 本次未读取到任何有效条目，保留旧缓存" +
+                        if (skipped.isEmpty()) "" else "（${skipped.joinToString("；") { it.describe() }}）"
+                )
+            }
             CodexRadarSnapshot(
-                radarScores = radarScores,
-                communityScores = communityScores,
+                radarScores = radarResult.scores,
+                communityScores = communityResult.scores,
                 generatedAtText = CodexRadarTime.now(),
-                partial = partial
+                partial = partial || skipped.isNotEmpty()
             ).also {
                 WebHookDebug.log(
-                    "[XAiWebHook] [Codex Radar] ${if (partial) "部分" else "完整"}快照解析成功：" +
-                        "雷达分=${radarScores.size}，社区体感分=${communityScores.size}"
+                    "[XAiWebHook] [Codex Radar] ${if (it.partial) "部分" else "完整"}快照解析成功：" +
+                        "雷达分=${radarResult.scores.size}/${radarResult.totalRows}，" +
+                        "社区体感分=${communityResult.scores.size}/${communityResult.totalRows}"
                 )
+                if (skipped.isNotEmpty()) {
+                    CodexRadarLog.warning(
+                        "Codex Radar 有 ${skipped.size} 条数据本次未缓存（已跳过，不影响其它条目）：" +
+                            skipped.joinToString("；") { row -> row.describe() }
+                    )
+                }
             }
         } catch (error: CodexRadarException) {
             throw error
@@ -524,11 +547,40 @@ internal object CodexRadarAction {
         results: List<BrowserTextListResult>
     ): CodexRadarSnapshot? = parsePartialSnapshot(results)
 
+    /**
+     * 逐表解析：non-lenient 模式下任何问题都直接抛出；
+     * lenient（页面步骤超时/未就绪）模式下，整张表读不到时退化为空结果，
+     * 让另一张表和旧缓存的行继续生效。
+     */
+    private fun parseTable(
+        kind: String,
+        lenient: Boolean,
+        parse: () -> CodexRadarParseResult
+    ): CodexRadarParseResult {
+        return try {
+            parse()
+        } catch (error: CodexRadarException) {
+            if (!lenient) throw error
+            CodexRadarLog.warning("Codex Radar $kind 本次未读取到有效数据，使用旧缓存补齐：${summarize(error)}")
+            CodexRadarParseResult(scores = emptyList(), skipped = emptyList(), totalRows = 0)
+        }
+    }
+
     private fun parsePartialSnapshot(
         results: List<BrowserTextListResult>
     ): CodexRadarSnapshot? {
-        return runCatching { parseSnapshot(results, partial = true) }.getOrNull()
+        // 超时时刻可能只读出部分结果（甚至一条都没有），补齐成两个空表再走逐行解析，
+        // 这样能读到的行依旧会写进缓存，读不到的行由旧缓存保留。
+        if (results.isEmpty()) return null
+        val padded = if (results.size >= 2) results else results + emptyTextListResult()
+        return runCatching { parseSnapshot(padded, partial = true) }.getOrNull()
     }
+
+    private fun emptyTextListResult(): BrowserTextListResult = BrowserTextListResult(
+        effectiveUrl = "",
+        items = emptyList(),
+        emptyState = true
+    )
 
     private fun logPartialSnapshot(
         spec: CodexRadarFetchSpec,

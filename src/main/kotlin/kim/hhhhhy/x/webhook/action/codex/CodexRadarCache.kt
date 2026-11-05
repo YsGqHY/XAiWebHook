@@ -81,19 +81,31 @@ internal object CodexRadarCache {
         return Entry(snapshot = snapshot, savedAtEpochMillis = envelope.savedAtEpochMillis)
     }
 
+    /**
+     * 写入缓存。mergeWithExisting=true 时先读取同一页面的旧缓存并按行合并：
+     * 本次解析到的行覆盖旧值，本次缺失的行沿用旧缓存值，避免单条缺失导致整份缓存写不进去。
+     * 默认保持严格语义，由调用方显式选择是否合并。
+     */
     fun write(
         path: Path,
         pageUrl: String,
         snapshot: CodexRadarSnapshot,
-        savedAtEpochMillis: Long = System.currentTimeMillis()
+        savedAtEpochMillis: Long = System.currentTimeMillis(),
+        mergeWithExisting: Boolean = false
     ): Unit {
-        validateSnapshot(snapshot)
+        val previous = if (mergeWithExisting) {
+            read(path = path, expectedPageUrl = pageUrl)?.snapshot
+        } else {
+            null
+        }
+        val merged = snapshot.mergeWith(previous)
+        validateSnapshot(merged)
         require(savedAtEpochMillis > 0L) { "Codex Radar cache timestamp must be positive" }
         val envelope = CacheEnvelope.fromSnapshot(
             pageUrl = pageUrl,
             cacheKey = cacheKey(pageUrl),
             savedAtEpochMillis = savedAtEpochMillis,
-            snapshot = snapshot
+            snapshot = merged
         )
         val encoded = json.encodeToString(envelope)
         require(encoded.toByteArray(StandardCharsets.UTF_8).size.toLong() <= MAX_CACHE_BYTES) {

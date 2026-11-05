@@ -179,6 +179,85 @@ internal class CodexRadarReportTest {
     }
 
     @Test
+    fun timeoutWithWholeTableMissingStillCachesOtherTable(): Unit {
+        // 复现线上场景：雷达分区块整块没渲染出来（步骤等待超时），社区体感分已就绪。
+        val snapshot = requireNotNull(
+            CodexRadarAction.parsePartialSnapshotForTest(
+                listOf(
+                    result(),
+                    result(
+                        item(1, "GPT-6 Astra high", "7.2", "GPT-6 Astra high\n7.2\n60 人评分"),
+                        item(2, "GPT-6 Luna high", "6.5", "GPT-6 Luna high\n6.5\n20 人评分")
+                    )
+                )
+            )
+        )
+        assertTrue(snapshot.partial)
+        assertTrue(snapshot.radarScores.isEmpty())
+        assertEquals(2, snapshot.communityScores.size)
+    }
+
+    @Test
+    fun timeoutWithNoRowsAtAllKeepsOldCache(): Unit {
+        // 一条都没读到时返回 null，调用方保留旧缓存，不会写入空快照。
+        assertEquals(
+            null,
+            CodexRadarAction.parsePartialSnapshotForTest(listOf(result(), result()))
+        )
+    }
+
+    @Test
+    fun timeoutPartialWriteMergesIntoCachedRowsPerRow(): Unit {
+        val directory = Files.createTempDirectory("codex-radar-timeout-merge")
+        try {
+            val path = directory.resolve("codex-radar-cache.json")
+            val pageUrl = "https://codexradar.com/"
+            CodexRadarCache.write(
+                path = path,
+                pageUrl = pageUrl,
+                snapshot = CodexRadarSnapshot(
+                    radarScores = listOf(
+                        CodexRadarScore("GPT-6 Astra", "high", 121.1),
+                        CodexRadarScore("GPT-6 Luna", "high", 98.5)
+                    ),
+                    communityScores = listOf(
+                        CodexRadarScore("GPT-6 Astra", "high", 7.0, 50),
+                        CodexRadarScore("GPT-6 Luna", "high", 6.2, 20)
+                    ),
+                    generatedAtText = "2026-10-10 12:00"
+                ),
+                savedAtEpochMillis = 1_000L
+            )
+
+            // 第二次抓取时雷达分整块超时未渲染，只有社区体感分读到了新值
+            val partial = requireNotNull(
+                CodexRadarAction.parsePartialSnapshotForTest(
+                    listOf(
+                        result(),
+                        result(item(1, "GPT-6 Astra high", "8.4", "GPT-6 Astra high\n8.4\n80 人评分"))
+                    )
+                )
+            )
+            CodexRadarCache.write(
+                path = path,
+                pageUrl = pageUrl,
+                snapshot = partial,
+                savedAtEpochMillis = 2_000L,
+                mergeWithExisting = true
+            )
+
+            val saved = requireNotNull(CodexRadarCache.read(path, pageUrl, nowEpochMillis = 3_000L)).snapshot
+            // 雷达分整表缺失，逐行沿用旧缓存
+            assertEquals(listOf(121.1, 98.5), saved.radarScores.map { it.value })
+            // 社区体感分命中行用新值，未命中的行沿用旧值
+            assertEquals(8.4, saved.communityScores[0].value, 1e-9)
+            assertEquals(6.2, saved.communityScores[1].value, 1e-9)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun chartContainsBothNamedScorePanelsAndRendersPng(): Unit {
         val snapshot = CodexRadarSnapshot(
             radarScores = listOf(
@@ -397,6 +476,108 @@ internal class CodexRadarReportTest {
         communityScores = listOf(CodexRadarScore("GPT-6 Astra", "high", 7.2, 60)),
         generatedAtText = generatedAtText
     )
+
+    @Test
+    fun radarLabelWithScreenReaderSuffixIsParsed(): Unit {
+        // 新版页面单元格的 name 元素是读屏文本，带分数/成本/耗时后缀
+        val result = result(
+            item(
+                1,
+                "GPT-6.1 Sol ultra · 132.79 · USD 1.38 · 2229.6 秒",
+                "132.79",
+                "GPT-6.1 Sol ultra · 132.79 · USD 1.38 · 2229.6 秒"
+            ),
+            item(
+                2,
+                "GPT-6 Astra high · 84.2 · USD 0.21 · 900 秒",
+                "84.2",
+                "GPT-6 Astra high · 84.2 · USD 0.21 · 900 秒"
+            )
+        )
+
+        val parsed = CodexRadarParser.parseRadarRows(result)
+
+        assertEquals(2, parsed.scores.size)
+        assertEquals("GPT-6.1 Sol", parsed.scores[0].model)
+        assertEquals("ultra", parsed.scores[0].effort)
+        assertEquals(132.79, parsed.scores[0].value, 1e-9)
+        assertEquals("GPT-6 Astra", parsed.scores[1].model)
+        assertEquals("high", parsed.scores[1].effort)
+    }
+
+    @Test
+    fun singleUnloadedRowIsSkippedWithoutBreakingOtherRows(): Unit {
+        val result = result(
+            item(1, "GPT-6 Astra ultra", "121.1", "GPT-6 Astra ultra\n121.1"),
+            // 该行未加载：分数是占位符
+            item(2, "GPT-5.6 Sol high", "—", "GPT-5.6 Sol high\n—\n未读取 · 点击查询"),
+            // 该行结构异常：名称解析不出思考档位
+            item(3, "Chaos Entry", "33.3", "Chaos Entry\n33.3"),
+            // 该行超出范围
+            item(4, "GPT-6.1 Sol max", "999", "GPT-6.1 Sol max\n999"),
+            item(5, "GPT-6 Luna low", "40.5", "GPT-6 Luna low\n40.5")
+        )
+
+        val parsed = CodexRadarParser.parseRadarRows(result)
+
+        assertEquals(2, parsed.scores.size)
+        assertEquals(listOf("GPT-6 Astra", "GPT-6 Luna"), parsed.scores.map { it.model })
+        assertEquals(5, parsed.totalRows)
+        assertEquals(3, parsed.skipped.size)
+        assertTrue(parsed.skipped.all { it.kind == "雷达分" })
+        assertTrue(parsed.skipped.map { it.index }.containsAll(listOf(1, 2, 3)))
+    }
+
+    @Test
+    fun skippedRowKeepsPreviouslyCachedValueInsteadOfDroppingIt(): Unit {
+        val directory = Files.createTempDirectory("codex-radar-row-cache")
+        try {
+            val path = directory.resolve("codex-radar-cache.json")
+            val pageUrl = "https://codexradar.com/"
+            val previous = CodexRadarSnapshot(
+                radarScores = listOf(
+                    CodexRadarScore("GPT-6 Astra", "ultra", 121.1),
+                    CodexRadarScore("GPT-5.6 Sol", "high", 84.2)
+                ),
+                communityScores = listOf(
+                    CodexRadarScore("GPT-6 Astra", "ultra", 7.2, 60),
+                    CodexRadarScore("GPT-5.6 Sol", "high", 6.0, 12)
+                ),
+                generatedAtText = "2026-10-10 12:00"
+            )
+            CodexRadarCache.write(path, pageUrl, previous, savedAtEpochMillis = 1_000L)
+
+            // 第二次抓取时 GPT-5.6 Sol 两行都没加载，只有 GPT-6 Astra 有数据
+            val current = CodexRadarSnapshot(
+                radarScores = listOf(CodexRadarScore("GPT-6 Astra", "ultra", 130.0)),
+                communityScores = listOf(CodexRadarScore("GPT-6 Astra", "ultra", 8.1, 70)),
+                generatedAtText = "2026-10-10 13:00",
+                partial = true
+            )
+            CodexRadarCache.write(
+                path = path,
+                pageUrl = pageUrl,
+                snapshot = current,
+                savedAtEpochMillis = 2_000L,
+                mergeWithExisting = true
+            )
+
+            val merged = requireNotNull(
+                CodexRadarCache.read(path, pageUrl, nowEpochMillis = 3_000L)
+            ).snapshot
+            assertEquals(
+                listOf("GPT-6 Astra", "GPT-5.6 Sol"),
+                merged.radarScores.map { it.model }
+            )
+            // 本次抓到的行用新值
+            assertEquals(130.0, merged.radarScores[0].value, 1e-9)
+            // 本次缺失的行沿用旧缓存值，不会因为单条缺失被丢掉
+            assertEquals(84.2, merged.radarScores[1].value, 1e-9)
+            assertEquals(6.0, merged.communityScores[1].value, 1e-9)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
 
     private fun readyResult(vararg items: BrowserTextListItem): BrowserTextListResult =
         result(

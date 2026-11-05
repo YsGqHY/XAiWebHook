@@ -12,6 +12,9 @@ import java.util.Locale
  */
 internal object CodexRadarParser {
     private val EFFORT_PATTERN = Regex("(.+?)\\s+(low|medium|high|xhigh|max|ultra)$", RegexOption.IGNORE_CASE)
+    // 读屏文本会带“· 132.79 · USD 1.38 · 2229.6 秒”之类的附加信息，这里取“模型 + 档位”前缀。
+    private val EFFORT_PREFIX_PATTERN =
+        Regex("^(.+?)\\s+(low|medium|high|xhigh|max|ultra)(?=\\s|$)", RegexOption.IGNORE_CASE)
     private val RATING_COUNT_PATTERN = Regex("(\\d+)\\s*人评分")
     private val PLACEHOLDER_VALUES = setOf(
         "",
@@ -26,57 +29,104 @@ internal object CodexRadarParser {
     )
 
     fun parseRadar(result: BrowserTextListResult): List<CodexRadarScore> {
-        return parse(
+        return parseRows(
             kind = "雷达分",
             result = result,
             maximum = 150.0
-        )
+        ).scores
     }
 
     fun parseCommunity(result: BrowserTextListResult): List<CodexRadarScore> {
-        return parse(
+        return parseRows(
             kind = "社区体感分",
             result = result,
             maximum = 10.0
-        )
+        ).scores
     }
 
-    private fun parse(
+    /** 逐行解析雷达分，保留被跳过的行信息供缓存流程记录。 */
+    fun parseRadarRows(result: BrowserTextListResult): CodexRadarParseResult {
+        return parseRows(kind = "雷达分", result = result, maximum = 150.0)
+    }
+
+    /** 逐行解析社区体感分，保留被跳过的行信息供缓存流程记录。 */
+    fun parseCommunityRows(result: BrowserTextListResult): CodexRadarParseResult {
+        return parseRows(kind = "社区体感分", result = result, maximum = 10.0)
+    }
+
+    /**
+     * 以单行数据为最小解析单位：
+     * 某一行未加载、占位符、分数非法或名称不可解析时只跳过该行并记录原因，
+     * 继续解析后续行；只有整表都没有可用行时才判定为结构性问题并报错。
+     */
+    private fun parseRows(
         kind: String,
         result: BrowserTextListResult,
         maximum: Double
-    ): List<CodexRadarScore> {
+    ): CodexRadarParseResult {
         if (result.items.isEmpty()) {
             throw CodexRadarException(
                 "$kind 数据缺失：指定页面区块未匹配到任何可解析条目"
             )
         }
 
-        val scores = result.items.mapNotNull { item ->
-            val score = parseScore(kind, item)
-                ?: return@mapNotNull null
-            val label = item.nameText?.trim().orEmpty()
-                .ifBlank { item.ariaLabel?.trim().orEmpty() }
-                .ifBlank { item.itemText?.lineSequence()?.firstOrNull()?.trim().orEmpty() }
+        val scores = mutableListOf<CodexRadarScore>()
+        val skipped = mutableListOf<CodexRadarSkippedRow>()
+        result.items.forEachIndexed { index, item ->
+            val parsed = parseRow(kind, item, maximum)
+            when (parsed) {
+                is RowOutcome.Valid -> scores += parsed.score
+                is RowOutcome.Skipped -> skipped += CodexRadarSkippedRow(
+                    kind = kind,
+                    index = index,
+                    label = parsed.label,
+                    reason = parsed.reason
+                )
+            }
+        }
+
+        if (scores.isEmpty()) {
+            val reasons = skipped.joinToString("；") { it.describe() }
+            throw CodexRadarException(
+                "$kind 数据缺失：匹配到 ${result.items.size} 个条目，但没有有效分数（$reasons）"
+            )
+        }
+        return CodexRadarParseResult(
+            scores = scores,
+            skipped = skipped,
+            totalRows = result.items.size
+        )
+    }
+
+    private sealed interface RowOutcome {
+        data class Valid(val score: CodexRadarScore) : RowOutcome
+        data class Skipped(val label: String, val reason: String) : RowOutcome
+    }
+
+    private fun parseRow(
+        kind: String,
+        item: BrowserTextListItem,
+        maximum: Double
+    ): RowOutcome {
+        val label = displayLabel(item)
+        return try {
+            val score = parseScore(kind, item) ?: return RowOutcome.Skipped(label, "分数未加载")
             val (model, effort) = parseLabel(kind, label)
             val count = RATING_COUNT_PATTERN.find(item.itemText.orEmpty())
                 ?.groupValues
                 ?.getOrNull(1)
                 ?.toIntOrNull()
-            CodexRadarScore(
-                model = model,
-                effort = effort,
-                value = validateScore(kind, score, maximum, label),
-                ratingCount = count
+            RowOutcome.Valid(
+                CodexRadarScore(
+                    model = model,
+                    effort = effort,
+                    value = validateScore(kind, score, maximum, label),
+                    ratingCount = count
+                )
             )
+        } catch (error: CodexRadarException) {
+            RowOutcome.Skipped(label, error.message.orEmpty().ifBlank { "解析失败" })
         }
-
-        if (scores.isEmpty()) {
-            throw CodexRadarException(
-                "$kind 数据缺失：匹配到 ${result.items.size} 个条目，但没有有效分数"
-            )
-        }
-        return scores
     }
 
     private fun parseScore(kind: String, item: BrowserTextListItem): Double? {
@@ -110,7 +160,9 @@ internal object CodexRadarParser {
     }
 
     private fun parseLabel(kind: String, label: String): Pair<String, String> {
-        val match = EFFORT_PATTERN.matchEntire(label)
+        // 先按“模型 + 档位”完整匹配；新版页面单元格的读屏文本会带附加信息
+        // （如 “GPT-6.1 Sol ultra · 132.79 · USD 1.38 · 2229.6 秒”），再退化为前缀匹配。
+        val match = EFFORT_PATTERN.matchEntire(label) ?: EFFORT_PREFIX_PATTERN.find(label)
             ?: throw CodexRadarException(
                 "$kind 页面结构变化：无法从条目名称“$label”解析模型和思考档位"
             )

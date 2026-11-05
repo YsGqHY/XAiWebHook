@@ -2592,6 +2592,24 @@ internal object WebPageScreenshotAction {
                         throw error
                     } catch (error: Throwable) {
                         authSignal.throwIfRejected(page)
+                        // 步骤失败（例如某一行还没加载出来就超时）时，已读取到的行仍然有效，
+                        // 交给上层做逐行缓存，避免一条未就绪导致整份数据作废。
+                        val partial = runCatching {
+                            requests.map { request ->
+                                readTextList(
+                                    page = page,
+                                    request = request,
+                                    statusAttribute = statusAttribute,
+                                    allowMissingItems = true
+                                )
+                            }
+                        }.getOrNull()
+                        if (!partial.isNullOrEmpty() && partial.any { it.items.isNotEmpty() }) {
+                            throw BrowserTextQueryTimeoutException(
+                                message = textQueryError(page, part, error).message.orEmpty(),
+                                lastResults = partial
+                            )
+                        }
                         throw textQueryError(page, part, error)
                     }
                 } finally {
