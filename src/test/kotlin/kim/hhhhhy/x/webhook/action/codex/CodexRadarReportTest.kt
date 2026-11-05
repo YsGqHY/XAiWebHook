@@ -97,8 +97,13 @@ internal class CodexRadarReportTest {
         assertEquals("https://codexradar.com/", spec.pageUrl)
         assertEquals(45_000L, spec.timeoutMillis)
         assertEquals("load", spec.waitUntil)
-        assertTrue(stepSelectors.any { it.contains("intelligence-efficiency") })
+        // 站点重构后雷达分移到 #iq 下的 [data-chapter="iq"]，社区分仍在 #model-ratings
+        assertTrue(stepSelectors.any { it.contains("iq") && it.contains("data-chapter") })
         assertTrue(stepSelectors.any { it.contains("model-ratings") })
+        // 两个区块等待都应为可容错步骤，避免单个区块缺失就中断整次刷新
+        val waitSteps = steps.map { it.asMap() }.filter { it["op"] == "wait" }
+        assertEquals(2, waitSteps.size)
+        assertTrue(waitSteps.all { it["optional"] == true })
         assertEquals(
             "https://codexradar.com/",
             (part["url"] as String)

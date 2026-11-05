@@ -49,14 +49,30 @@ internal object CodexRadarAction {
     private const val MAX_CACHE_TTL_MILLIS = 30L * 24L * 60L * 60L * 1000L
     private const val MAX_REFRESH_INTERVAL_MILLIS = 30L * 24L * 60L * 60L * 1000L
 
-    /** 页面目标区块。 */
-    const val RADAR_CONTAINER_XPATH: String = "//*[@id=\"intelligence-efficiency\"]/div[2]"
-    const val COMMUNITY_CONTAINER_XPATH: String = "//*[@id=\"model-ratings\"]/div[3]"
+    /**
+     * 页面目标区块。
+     *
+     * 站点在 2026-11 重构了首页结构，导致旧选择器全部失效、刷新一直等满超时：
+     * - 旧容器 `#intelligence-efficiency` 已完全移除，雷达分改为 `#iq` 下的 `[data-chapter="iq"]`，
+     *   以 `.cir-table` 表格呈现：行为模型、列为思考档位，单元格为 `button[data-cir-setting]`；
+     * - 旧卡片属性 `data-efficiency-card` 不再存在；
+     * - 社区体感分仍在 `#model-ratings`，但改由 `article.mr-card[data-rating-model]` 承载。
+     */
+    const val RADAR_CONTAINER_XPATH: String = "//*[@id=\"iq\"]//*[@data-chapter=\"iq\"]"
+    const val COMMUNITY_CONTAINER_XPATH: String = "//*[@id=\"model-ratings\"]"
 
     private const val RADAR_ITEMS_XPATH =
-        "$RADAR_CONTAINER_XPATH//*[@data-efficiency-card]"
+        "$RADAR_CONTAINER_XPATH//button[@data-cir-setting]"
     private const val COMMUNITY_ITEMS_XPATH =
         "$COMMUNITY_CONTAINER_XPATH//*[@data-rating-model]"
+
+    // 雷达分单元格：读屏文本形如“GPT-6.1 Sol ultra · 132.79 · USD 1.38 · 2229.6 秒”，分数在 strong 里
+    private const val RADAR_LABEL_SELECTOR = "span.cir-sr"
+    private const val RADAR_STATUS_SELECTOR = "span.cir-cell > strong"
+
+    // 社区分卡片：名称与 /10 平均值分别在这两个元素中
+    private const val COMMUNITY_LABEL_SELECTOR = "strong.mr-editor-label"
+    private const val COMMUNITY_STATUS_SELECTOR = "strong.mr-value"
 
     private val STATE_ATTRIBUTES = listOf(
         "data-radar-query-pending",
@@ -615,8 +631,8 @@ internal object CodexRadarAction {
             ACTION_ID,
             PART_ID,
             RADAR_ITEMS_XPATH,
-            ".intelligence-efficiency-card-label",
-            ".intelligence-efficiency-card-iq > strong",
+            RADAR_LABEL_SELECTOR,
+            RADAR_STATUS_SELECTOR,
             null,
             MAX_ITEMS,
             RADAR_CONTAINER_XPATH,
@@ -627,8 +643,8 @@ internal object CodexRadarAction {
             ACTION_ID,
             PART_ID,
             COMMUNITY_ITEMS_XPATH,
-            ".model-rating-name strong",
-            ".model-rating-average",
+            COMMUNITY_LABEL_SELECTOR,
+            COMMUNITY_STATUS_SELECTOR,
             null,
             MAX_ITEMS,
             COMMUNITY_CONTAINER_XPATH,
@@ -645,16 +661,20 @@ internal object CodexRadarAction {
             "timeout_ms" to spec.timeoutMillis,
             "selector" to "body",
             "steps" to listOf(
+                // 两个区块的等待都设为 optional：站点改版或某个区块临时未渲染时，
+                // 不再让整次抓取等满超时失败，而是继续按逐行/逐表策略缓存已读到的数据。
                 mapOf(
                     "op" to "wait",
                     "selector" to RADAR_CONTAINER_XPATH,
                     "state" to "attached",
+                    "optional" to true,
                     "timeout_ms" to spec.maxWaitMillis
                 ),
                 mapOf(
                     "op" to "wait",
                     "selector" to COMMUNITY_CONTAINER_XPATH,
                     "state" to "attached",
+                    "optional" to true,
                     "timeout_ms" to spec.maxWaitMillis
                 )
             )
