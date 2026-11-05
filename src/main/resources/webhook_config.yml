@@ -43,6 +43,11 @@ browser:
   channel: "msedge"
   # 自定义浏览器可执行文件路径，默认留空；配置后优先于 channel
   executable_path: ""
+  # 外部 Node.js 可执行文件路径（node.exe），默认留空表示使用 Playwright 内置运行时。
+  # 内置运行时会先解压到临时目录再启动；若临时目录被杀软隔离或清理策略回收，
+  # 会出现 "Failed to launch driver: CreateProcess error=2 ... node.exe"，此时可安装 Node.js 18+
+  # 并填入其绝对路径（Windows 形如 C:/Program Files/nodejs/node.exe；Linux/macOS 形如 /usr/local/bin/node）
+  node_path: ""
   # 浏览器功能专用 HTTP(S) 代理，覆盖 Playwright 页面、认证 APIRequest 与 CLI Bridge 请求；留空表示直连
   # 支持 http://127.0.0.1:7890、https://127.0.0.1:7890，也可写为 http://user:password@127.0.0.1:7890
   proxy: ""

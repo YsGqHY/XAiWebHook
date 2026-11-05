@@ -3306,4 +3306,58 @@ internal class WebPageScreenshotActionTest {
         val header = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
         return size > header.size && take(header.size).toByteArray().contentEquals(header)
     }
+
+    @Test
+    fun playwrightPlatformDirMatchesDriverJarLayout(): Unit {
+        assertEquals("win32_x64", WebPageScreenshotAction.playwrightPlatformDir("Windows 11", "amd64"))
+        assertEquals("win32_x64", WebPageScreenshotAction.playwrightPlatformDir("Windows Server 2022", "x86_64"))
+        assertEquals("linux", WebPageScreenshotAction.playwrightPlatformDir("Linux", "amd64"))
+        assertEquals("linux-arm64", WebPageScreenshotAction.playwrightPlatformDir("Linux", "aarch64"))
+        assertEquals("mac", WebPageScreenshotAction.playwrightPlatformDir("Mac OS X", "x86_64"))
+        assertEquals("mac-arm64", WebPageScreenshotAction.playwrightPlatformDir("Mac OS X", "aarch64"))
+    }
+
+    @Test
+    fun playwrightDriverFailureIsRecognisedFromNestedCause(): Unit {
+        val driverError = IllegalStateException(
+            "wrap",
+            PlaywrightException("Failed to launch driver")
+        )
+        assertTrue(WebPageScreenshotAction.isPlaywrightDriverFailure(driverError))
+
+        val createProcessError = PlaywrightException(
+            "Failed to launch driver",
+            java.io.IOException("Cannot run program \"C:\\Temp\\playwright-java-1\\node.exe\": CreateProcess error=2")
+        )
+        assertTrue(WebPageScreenshotAction.isPlaywrightDriverFailure(createProcessError))
+
+        val unrelated = PlaywrightException("Target page, context or browser has been closed")
+        assertFalse(WebPageScreenshotAction.isPlaywrightDriverFailure(unrelated))
+    }
+
+    @Test
+    fun playwrightDriverStateReportsMissingNodeRuntime(): Unit {
+        val tempRoot = Files.createTempDirectory("xwebhook-driver-state").toFile()
+        try {
+            val driverDir = Files.createDirectory(tempRoot.toPath().resolve("playwright-java-42"))
+            Files.createDirectory(driverDir.resolve("package"))
+            val missing = WebPageScreenshotAction.describePlaywrightDriverState(tempRoot.absolutePath, "node.exe")
+            assertTrue(missing.contains("playwright-java-42"), missing)
+            assertTrue(missing.contains("缺少 node.exe"), missing)
+
+            Files.createFile(driverDir.resolve("node.exe"))
+            val present = WebPageScreenshotAction.describePlaywrightDriverState(tempRoot.absolutePath, "node.exe")
+            assertTrue(present.contains("含 node.exe"), present)
+            assertEquals(1, WebPageScreenshotAction.listPlaywrightDriverDirs(tempRoot.absolutePath).size)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun playwrightDriverTempRootFallsBackToJavaTempDir(): Unit {
+        assertEquals("/custom/driver", WebPageScreenshotAction.playwrightDriverTempRoot("/custom/driver", "/tmp"))
+        assertEquals("/tmp", WebPageScreenshotAction.playwrightDriverTempRoot("", "/tmp"))
+        assertEquals("/tmp", WebPageScreenshotAction.playwrightDriverTempRoot(null, "/tmp"))
+    }
 }

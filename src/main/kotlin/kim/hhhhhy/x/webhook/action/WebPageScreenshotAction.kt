@@ -49,6 +49,8 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.time.Instant
 import java.util.Base64
@@ -341,6 +343,118 @@ internal object WebPageScreenshotAction {
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" to "1",
         PLAYWRIGHT_DISABLE_INTERNAL_FONT_WAIT to "1"
     )
+
+    /**
+     * 与 Playwright DriverJar 保持一致的平台目录名，用于定位 jar 内的 driver 运行时资源。
+     */
+    internal fun playwrightPlatformDir(
+        osName: String = System.getProperty("os.name").orEmpty(),
+        osArch: String = System.getProperty("os.arch").orEmpty()
+    ): String {
+        val name = osName.lowercase(Locale.ROOT)
+        val arch = osArch.lowercase(Locale.ROOT)
+        return when {
+            name.contains("windows") -> "win32_x64"
+            name.contains("linux") -> if (arch == "aarch64") "linux-arm64" else "linux"
+            name.contains("mac os x") -> if (arch == "aarch64") "mac-arm64" else "mac"
+            else -> "win32_x64"
+        }
+    }
+
+    /**
+     * Playwright 把内置 node 运行时解压到的临时根目录；可用 -Dplaywright.driver.tmpdir 覆盖。
+     */
+    internal fun playwrightDriverTempRoot(
+        configured: String? = System.getProperty("playwright.driver.tmpdir"),
+        defaultRoot: String? = System.getProperty("java.io.tmpdir")
+    ): String = configured?.takeIf { it.isNotBlank() } ?: defaultRoot.orEmpty()
+
+    internal fun isPlaywrightDriverFailure(error: Throwable): Boolean {
+        return throwableChain(error).any { item ->
+            val message = item.message.orEmpty()
+            message.contains("Failed to launch driver", ignoreCase = true) ||
+                message.contains("CreateProcess error=2", ignoreCase = true)
+        }
+    }
+
+    /**
+     * 枚举临时根目录下 Playwright 自己创建的驱动目录，用来判断 node 运行时到底有没有被解压出来。
+     */
+    internal fun listPlaywrightDriverDirs(tempRoot: String): List<Path> {
+        val root = runCatching { Paths.get(tempRoot) }.getOrNull() ?: return emptyList()
+        if (!Files.isDirectory(root)) return emptyList()
+        return runCatching {
+            Files.newDirectoryStream(root, "playwright-java-*").use { stream ->
+                stream.filter { Files.isDirectory(it) }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    internal fun describePlaywrightDriverState(tempRoot: String, nodeName: String): String {
+        if (tempRoot.isBlank()) return "驱动临时目录未知"
+        val dirs = listPlaywrightDriverDirs(tempRoot)
+        if (dirs.isEmpty()) {
+            return "$tempRoot 下没有 playwright-java-* 目录（驱动未解压或已被清理）"
+        }
+        val detail = dirs.takeLast(3).joinToString("；") { dir ->
+            val entryCount = runCatching { Files.list(dir).use { list -> list.count().toInt() } }.getOrDefault(0)
+            val nodeState = if (Files.exists(dir.resolve(nodeName))) "含 $nodeName" else "缺少 $nodeName"
+            "${dir.fileName}：$nodeState，${entryCount} 个条目"
+        }
+        return "$tempRoot 下最近的驱动目录 $detail"
+    }
+
+    /**
+     * 把 "Failed to launch driver" 翻译成可执行的排查提示：只说 CreateProcess error=2 无法定位到临时目录或打包问题。
+     */
+    private fun buildPlaywrightDriverHint(config: BrowserConfig, error: Throwable): String {
+        val nodeName = if ("win32_x64" == playwrightPlatformDir()) "node.exe" else "node"
+        return buildString {
+            append("Playwright 驱动无法启动：")
+            append(summarizeRetryError(error))
+            append("；")
+            append(describePlaywrightDriverState(playwrightDriverTempRoot(), nodeName))
+            append("；排查建议：1) 把该临时目录加入杀软与磁盘清理白名单，或用 JVM 参数 -Dplaywright.driver.tmpdir 指定固定目录；")
+            append("2) 用 unzip -l 确认插件 jar 内含 driver/${playwrightPlatformDir()}/$nodeName；")
+            if (config.nodePath == null) {
+                append("3) 若仍失败，安装 Node.js 18 及以上并配置 browser.node_path，改为复用外部运行时")
+            } else {
+                append("3) 已配置 browser.node_path=${config.nodePath}，请确认该文件存在且可执行")
+            }
+        }
+    }
+
+    /**
+     * 配置 browser.node_path 时把路径交给 Playwright 的 playwright.nodejs.path 属性，
+     * 让驱动跳过大体积内置 node 的解压，直接复用系统 Node.js。
+     */
+    private fun applyPlaywrightNodeJsPath(nodePath: String?) {
+        if (nodePath.isNullOrBlank()) return
+        val resolved = runCatching { Paths.get(nodePath) }.getOrNull()
+        if (resolved == null || !Files.isRegularFile(resolved)) {
+            WebHookDebug.log("[XAiWebHook] [浏览器] browser.node_path 指向的文件不可用，继续使用内置运行时: $nodePath")
+            return
+        }
+        System.setProperty("playwright.nodejs.path", resolved.toAbsolutePath().toString())
+        WebHookDebug.log("[XAiWebHook] [浏览器] 使用外部 Node.js 运行时: ${resolved.toAbsolutePath()}")
+    }
+
+    /**
+     * 打包裁剪掉 driver 资源时，Playwright 会在启动阶段抛 Failed to launch driver；
+     * 这里提前检查一次，把"jar 不完整"和"临时目录被清理"两类原因在日志里区分开。
+     */
+    private fun warnIfPlaywrightDriverMissing() {
+        val platformDir = playwrightPlatformDir()
+        val resource = runCatching {
+            WebPageScreenshotAction::class.java.classLoader?.getResource("driver/$platformDir")
+        }.getOrNull()
+        if (resource == null) {
+            WebHookDebug.log(
+                "[XAiWebHook] [浏览器] 当前类加载器未找到 driver/$platformDir 资源，" +
+                    "若随后驱动启动失败，说明插件 jar 未完整打包 Playwright 运行时"
+            )
+        }
+    }
 
     /**
      * 将页面模型卡一对一分配给 API 返回的模型名，返回值下标对应卡片、元素为模型下标。
@@ -2864,9 +2978,16 @@ internal object WebPageScreenshotAction {
             }
             browser?.let { return it }
 
-            val createdPlaywright = Playwright.create(
-                Playwright.CreateOptions().setEnv(playwrightDriverEnvironment())
-            )
+            applyPlaywrightNodeJsPath(config.nodePath)
+            warnIfPlaywrightDriverMissing()
+            val createdPlaywright = try {
+                Playwright.create(
+                    Playwright.CreateOptions().setEnv(playwrightDriverEnvironment())
+                )
+            } catch (error: PlaywrightException) {
+                if (!isPlaywrightDriverFailure(error)) throw error
+                throw IllegalStateException(buildPlaywrightDriverHint(config, error), error)
+            }
             val browserType = when (config.engine) {
                 "chromium" -> createdPlaywright.chromium()
                 "firefox" -> createdPlaywright.firefox()

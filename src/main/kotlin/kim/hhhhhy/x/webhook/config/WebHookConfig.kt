@@ -119,6 +119,7 @@ internal object WebHookConfig {
                 engine = browserMap.string("engine", "chromium").lowercase(),
                 channel = browserMap.stringOrNull("channel"),
                 executablePath = browserMap.stringOrNull("executable_path"),
+                nodePath = browserMap.stringOrNull("node_path"),
                 proxyUrl = HttpProxySupport.normalize(browserMap.stringOrNull("proxy")),
                 headless = browserMap.boolean("headless", true),
                 viewportWidth = browserMap.int("viewport_width", 1440).coerceIn(320, 7680),
@@ -140,6 +141,7 @@ internal object WebHookConfig {
   enabled       : ${browser.enabled}
   engine        : ${browser.engine}
   channel       : ${browser.channel ?: "(默认)"}
+  driverNode    : ${browser.nodePath ?: "(内置运行时)"}
   proxy         : ${HttpProxySupport.describe(browser.proxyUrl)}
   sessionCache  : ${if (browser.sessionCacheEnabled) browser.sessionCacheDirectory else "disabled"}
   allowedHosts  : ${browser.allowedHosts.size} 个""")
@@ -574,6 +576,8 @@ internal data class BrowserConfig(
     val engine: String,
     val channel: String?,
     val executablePath: String?,
+    // 外部 Node.js 可执行文件路径；配置后 Playwright 直接复用它，不再把内置 node 运行时解压到临时目录
+    val nodePath: String? = null,
     val headless: Boolean,
     val viewportWidth: Int,
     val viewportHeight: Int,
@@ -591,6 +595,7 @@ internal data class BrowserConfig(
             engine = "chromium",
             channel = null,
             executablePath = null,
+            nodePath = null,
             headless = true,
             viewportWidth = 1440,
             viewportHeight = 1000,
