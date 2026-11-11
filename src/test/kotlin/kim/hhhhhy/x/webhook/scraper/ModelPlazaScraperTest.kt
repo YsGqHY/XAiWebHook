@@ -250,6 +250,144 @@ internal class ModelPlazaScraperTest {
         assertFalse(ModelPlazaCookieCache(stateFile).cookieHeader(endpoint, nowMillis = 13_000L).contains("route_cookie="))
     }
 
+    @Test
+    fun `parseModelPlazaResponse should decode official pricing and group rate`() {
+        val platforms = ModelPlazaScraper.parseModelPlazaResponse(pricingResponse())
+
+        val model = platforms.first().models.single()
+        assertEquals("claude-fable-5-1", model.name)
+        assertEquals("新", model.badge)
+        assertEquals(10.0, model.official.inputPrice)
+        assertEquals(50.0, model.official.outputPrice)
+        assertEquals(12.5, model.official.cacheWritePrice)
+        assertEquals(0.25, model.official.cacheReadPrice)
+        assertFalse(model.isFinalPrice)
+
+        val group = platforms.first().groups.single()
+        assertEquals(132L, group.id)
+        assertEquals("Claude-Cursor低缓存", group.name)
+        assertEquals(0.4, group.rateMultiplier)
+    }
+
+    @Test
+    fun `modelPricingDetails should merge every block that lists the model`() {
+        val platforms = ModelPlazaScraper.parseModelPlazaResponse(pricingResponse())
+
+        val detail = ModelPlazaScraper.modelPricingDetails(platforms, "fable").single()
+
+        assertEquals("claude-fable-5-1", detail.modelName)
+        assertEquals(
+            listOf("Claude-Cursor低缓存", "ClaudeMax", "ccmax-纯文本满血"),
+            detail.groups.map { it.groupName }
+        )
+        assertEquals(listOf(0.4, 1.5, 0.35), detail.groups.map { it.rateMultiplier })
+        // 10 * 0.4 / 50 * 0.4 / 12.5 * 0.4 / 0.25 * 0.4
+        assertEquals(4.0, detail.groups[0].price.inputPrice)
+        assertEquals(20.0, detail.groups[0].price.outputPrice)
+        assertEquals(5.0, detail.groups[0].price.cacheWritePrice)
+        assertEquals(0.1, detail.groups[0].price.cacheReadPrice)
+        assertEquals(15.0, detail.groups[1].price.inputPrice)
+        assertEquals(3.5, detail.groups[2].price.inputPrice)
+    }
+
+    @Test
+    fun `modelPricingDetails should keep final price without applying rate`() {
+        val platforms = ModelPlazaScraper.parseModelPlazaResponse(finalPriceResponse())
+
+        val detail = ModelPlazaScraper.modelPricingDetails(platforms, "deepseek").single()
+
+        assertTrue(detail.groups.single().isFinalPrice)
+        assertEquals(0.2, detail.groups.single().price.inputPrice)
+        assertEquals(1.2, detail.groups.single().price.outputPrice)
+        // 官方价仍展示未打折的原始值
+        assertEquals(1.0, detail.official.inputPrice)
+        assertEquals(4.0, detail.official.outputPrice)
+    }
+
+    @Test
+    fun `groupPricingDetails should list models with the group rate applied`() {
+        val platforms = ModelPlazaScraper.parseModelPlazaResponse(pricingResponse())
+
+        val detail = ModelPlazaScraper.groupPricingDetails(platforms, "ccmax-纯文本满血").single()
+
+        assertEquals("ccmax-纯文本满血", detail.groupName)
+        assertEquals(0.35, detail.rateMultiplier)
+        assertEquals(3.5, detail.models.single().price.inputPrice)
+        assertEquals(17.5, detail.models.single().price.outputPrice)
+    }
+
+    @Test
+    fun `parseEndpointResponse should split supported and unsupported endpoints`() {
+        val bundle = ModelPlazaScraper.parseEndpointResponse(endpointResponse())
+
+        assertEquals("claude-fable-5-1", bundle.modelName)
+        assertEquals(132L, bundle.groupId)
+        assertEquals("Claude-Cursor低缓存", bundle.groupName)
+        assertEquals(5, bundle.endpoints.size)
+
+        val supported = bundle.endpoints.filter { it.supported }
+        assertEquals(
+            listOf("/v1/chat/completions", "/v1/responses", "/v1/messages"),
+            supported.map { it.path }
+        )
+        assertEquals(listOf("converted", "converted", "native"), supported.map { it.transport })
+        assertTrue(supported.all { it.method == "POST" })
+
+        val unsupported = bundle.endpoints.filterNot { it.supported }
+        assertEquals(2, unsupported.size)
+        assertTrue(unsupported.all { it.reasonCodes.contains("platform_unsupported") })
+    }
+
+    @Test
+    fun `buildApiEndpoints should keep custom path and query for endpoint lookups`() {
+        val endpoints = ModelPlazaScraper.buildApiEndpoints(
+            baseUrl = "https://hk5.geek2api.com/model-plaza",
+            path = "/api/v1/model-plaza/endpoints",
+            query = "model=claude-fable-5-1&group_id=132"
+        )
+
+        assertEquals(
+            "https://hk5.geek2api.com/api/v1/model-plaza/endpoints?model=claude-fable-5-1&group_id=132",
+            endpoints[0].toString()
+        )
+        assertEquals(5, endpoints.size)
+    }
+
+    private fun pricingResponse(): String {
+        val model = """{"name":"claude-fable-5-1","badge":"新","pricing":{"billing_mode":"token","input_price":10,"output_price":50,"cache_write_price":12.5,"cache_read_price":0.25},"official_pricing":{"input_price":10,"output_price":50,"cache_write_price":12.5,"cache_write_1h_price":20,"cache_read_price":0.25}}"""
+        fun block(groupId: Long, groupName: String, rate: Double): String {
+            return """{"platform":"anthropic","models":[$model],"groups":[{"platform":"anthropic","id":$groupId,"name":"$groupName","rate_multiplier":$rate,"subscription_type":"standard"}]}"""
+        }
+        return """{"code":0,"message":"success","data":[${block(132, "Claude-Cursor低缓存", 0.4)},${block(28, "ClaudeMax", 1.5)},${block(129, "ccmax-纯文本满血", 0.35)}]}"""
+    }
+
+    private fun finalPriceResponse(): String {
+        return """
+            {"code":0,"message":"success","data":[{"platform":"deepseek","models":[{
+              "name":"deepseek-v4.1-flash",
+              "pricing":{"billing_mode":"token","input_price":0.2,"output_price":1.2,"cache_write_price":0,"cache_read_price":0.01,"is_final_price":true},
+              "official_pricing":{"input_price":1,"output_price":4,"cache_write_price":null,"cache_read_price":0.02}
+            }],"groups":[{"platform":"deepseek","id":140,"name":"特价Ds-v4.1f","rate_multiplier":0.15,"subscription_type":"standard"}]}]}
+        """.trimIndent()
+    }
+
+    private fun endpointResponse(): String {
+        return """
+            {"code":0,"message":"success","data":{
+              "model":"claude-fable-5-1",
+              "group":{"id":132,"name":"Claude-Cursor低缓存","platform":"anthropic","display_config":{}},
+              "basis":"configuration",
+              "endpoints":[
+                {"key":"chat_completions","method":"POST","path":"/v1/chat/completions","availability":"supported","transport":"converted","reason_codes":["conversion_limits"]},
+                {"key":"responses","method":"POST","path":"/v1/responses","availability":"supported","transport":"converted","reason_codes":["conversion_limits"]},
+                {"key":"messages","method":"POST","path":"/v1/messages","availability":"supported","transport":"native","reason_codes":[]},
+                {"key":"generate_content","method":"POST","path":"/v1beta/models/claude-fable-5-1:generateContent","availability":"unsupported","transport":"unknown","reason_codes":["platform_unsupported"]},
+                {"key":"stream_generate_content","method":"POST","path":"/v1beta/models/claude-fable-5-1:streamGenerateContent","availability":"unsupported","transport":"unknown","reason_codes":["platform_unsupported"]}
+              ]
+            }}
+        """.trimIndent()
+    }
+
     private fun gptSearchPlatforms(): List<ModelPlazaPlatform> {
         return listOf(
             ModelPlazaPlatform(
