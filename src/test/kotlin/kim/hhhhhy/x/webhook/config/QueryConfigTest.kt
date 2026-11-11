@@ -5,6 +5,7 @@ import org.yaml.snakeyaml.Yaml
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 internal class QueryConfigTest {
@@ -30,8 +31,14 @@ internal class QueryConfigTest {
         assertEquals("", config.polymarket.proxyUrl)
         assertTrue(config.polymarket.whitelist.keywords.containsAll(listOf("GPT", "Claude", "Gemini", "DeepSeek", "Qwen")))
         assertEquals(false, config.polymarket.whitelist.caseSensitive)
-        assertNotNull(config.modelPlaza.queries.models.responseFormat.successTemplate)
-        assertNotNull(config.modelPlaza.queries.groups.responseFormat.successTemplate)
+        // 默认改用内置图片卡片，因此不再需要 YAML 中的 success_template
+        assertNull(config.modelPlaza.queries.models.responseFormat.successTemplate)
+        assertNull(config.modelPlaza.queries.groups.responseFormat.successTemplate)
+        assertEquals("image", config.modelPlaza.queries.models.responseFormat.outputMode)
+        assertEquals("image", config.modelPlaza.queries.groups.responseFormat.outputMode)
+        assertTrue(config.modelPlaza.queries.models.responseFormat.imageFallbackToText)
+        assertEquals(1080, config.modelPlaza.queries.models.responseFormat.imageWidthPx)
+        assertEquals(6, config.modelPlaza.queries.models.maxEndpointLookups)
         assertTrue(config.modelPlaza.queries.models.keywordExtraction.requirePrefixMatch)
         val outgoingMap = root["outgoing"].asMap()
         val routes = outgoingMap["routes"] as List<*>

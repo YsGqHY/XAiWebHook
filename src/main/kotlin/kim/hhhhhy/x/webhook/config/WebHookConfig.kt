@@ -392,7 +392,17 @@ internal object WebHookConfig {
                 ?: defaults.responseFormat.successTemplate,
             pendingMessage = responseMap.string("pending_message", defaults.responseFormat.pendingMessage),
             failureMessage = responseMap.string("failure_message", defaults.responseFormat.failureMessage),
-            emptyMessage = responseMap.string("empty_message", defaults.responseFormat.emptyMessage)
+            emptyMessage = responseMap.string("empty_message", defaults.responseFormat.emptyMessage),
+            outputMode = responseMap.string("output_mode", defaults.responseFormat.outputMode)
+                .lowercase()
+                .takeIf { it == "image" || it == "text" || it == "both" }
+                ?: defaults.responseFormat.outputMode,
+            imageFallbackToText = responseMap.boolean(
+                "image_fallback_to_text",
+                defaults.responseFormat.imageFallbackToText
+            ),
+            imageWidthPx = responseMap.int("image_width_px", defaults.responseFormat.imageWidthPx)
+                .coerceIn(720, 1600)
         )
         val sort = map.string("sort", defaults.sort).lowercase()
             .takeIf { it == "source" || it == "alphabetical" } ?: defaults.sort
@@ -403,6 +413,8 @@ internal object WebHookConfig {
             sort = sort,
             limit = map.int("limit", defaults.limit).coerceIn(0, 100),
             maxRelatedItems = map.int("max_related_items", defaults.maxRelatedItems).coerceIn(0, 100),
+            maxEndpointLookups = map.int("max_endpoint_lookups", defaults.maxEndpointLookups)
+                .coerceIn(0, 200),
             responseFormat = response
         )
     }
@@ -741,6 +753,8 @@ internal data class ModelPlazaQueryConfig(
     val sort: String,
     val limit: Int,
     val maxRelatedItems: Int,
+    /** 单次查询最多补齐多少个“模型 × 分组”的端点信息，0 表示不限制。 */
+    val maxEndpointLookups: Int,
     val responseFormat: ModelPlazaResponseFormatConfig
 ) {
     companion object {
@@ -757,20 +771,21 @@ internal data class ModelPlazaQueryConfig(
             sort = "source",
             limit = 0,
             maxRelatedItems = 0,
+            maxEndpointLookups = 6,
             responseFormat = ModelPlazaResponseFormatConfig(
                 successTemplate = null,
-                pendingMessage = "正在查询分组模型，请稍候...",
+                pendingMessage = "正在查询模型定价与端点，请稍候...",
                 failureMessage = "查询失败，请稍后重试",
-                emptyMessage = "未找到包含该关键词的分组"
+                emptyMessage = "未找到包含该关键词的模型"
             )
         )
 
         fun groupsDefault(): ModelPlazaQueryConfig = modelsDefault().copy(
             responseFormat = ModelPlazaResponseFormatConfig(
                 successTemplate = null,
-                pendingMessage = "正在查询模型分组，请稍候...",
+                pendingMessage = "正在查询分组倍率与模型定价，请稍候...",
                 failureMessage = "查询失败，请稍后重试",
-                emptyMessage = "未找到包含该关键词的模型"
+                emptyMessage = "未找到包含该关键词的分组"
             )
         )
     }
@@ -780,7 +795,13 @@ internal data class ModelPlazaResponseFormatConfig(
     val successTemplate: String?,
     val pendingMessage: String,
     val failureMessage: String,
-    val emptyMessage: String
+    val emptyMessage: String,
+    /** image：只发图片；text：只发文本；both：文本 + 图片。 */
+    val outputMode: String = "image",
+    /** 图片渲染或上传失败时是否回退为文本，默认开启以免查询结果丢失。 */
+    val imageFallbackToText: Boolean = true,
+    /** 卡片宽度，单位像素。 */
+    val imageWidthPx: Int = 1080
 )
 
 internal data class ModelPlazaAuthConfig(

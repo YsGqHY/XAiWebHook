@@ -146,28 +146,33 @@ model_plaza:
       #     reject_message: "关键词格式不正确"
       # 结果排序：source 保持接口顺序，alphabetical 按名称排序；默认 source
       sort: "source"
-      # 顶层结果最多显示多少项，0 表示不限制，范围 0-100
+      # 顶层结果最多显示多少项（模型查询=模型数，分组查询=分组数），0 表示不限制，范围 0-100
       limit: 0
-      # 每项关联模型最多显示多少个，0 表示不限制，范围 0-100
+      # 每项关联内容最多显示多少个（模型查询=每个模型的分组数，分组查询=每个分组的模型数），0 表示不限制，范围 0-100
       max_related_items: 0
+      # 单次查询最多请求多少个“模型 × 分组”的端点清单，0 表示不请求端点；默认 6，范围 0-200
+      # 端点接口为 /api/v1/model-plaza/endpoints，每个分组一次请求，数值越大耗时越长
+      max_endpoint_lookups: 6
       response_format:
         # 查询中提示语；支持 ${query} 和事件模板变量
-        pending_message: "正在查询分组模型，请稍候..."
+        pending_message: "正在查询模型定价与端点，请稍候..."
         # 查询失败提示语
         failure_message: "查询失败，请稍后重试"
         # 无结果提示语
-        empty_message: "未找到包含该关键词的分组"
+        empty_message: "未找到包含该关键词的模型"
+        # 结果投递方式：image 只发图片卡片，text 只发文本，both 文本+图片；默认 image
+        output_mode: "image"
+        # 图片渲染或上传失败时是否回退为文本，默认 true，避免查询结果丢失
+        image_fallback_to_text: true
+        # 卡片宽度（像素），默认 1080，范围 720-1600
+        image_width_px: 1080
         # 成功模板支持 foreach、if/else、format_number 等安全模板语法
-        success_template: |
-          包含“${query}”的分组（共 ${count} 个）：
-          ${foreach relation in relations}
-          分组：${relation.groupName}
-          ${if relation.models}
-          ${foreach model in relation.models}- ${model.name}
-          ${endforeach}
-          ${else}- （无可用模型）
-          ${endif}
-          ${endforeach}
+        # 可用变量：${query}、${count}、${models[i].name}、${models[i].badge}、
+        # ${models[i].official.input}、${models[i].groups[j].name}、${models[i].groups[j].rate}、
+        # ${models[i].groups[j].discount}、${models[i].groups[j].price.input}、
+        # ${models[i].groups[j].endpoints[k].method}、${models[i].groups[j].endpoints[k].path}
+        # 留空表示使用内置的图片卡片（output_mode 为 text 时使用内置文本摘要）
+        success_template: ""
     groups:
       keyword_extraction:
         # 自动提取时按顺序移除一个前缀；默认兼容“模型/分组/model/group”
@@ -181,20 +186,18 @@ model_plaza:
       sort: "source"
       limit: 0
       max_related_items: 0
+      # 分组查询不请求端点清单，该值仅对 models 查询生效
+      max_endpoint_lookups: 6
       response_format:
-        pending_message: "正在查询模型分组，请稍候..."
+        pending_message: "正在查询分组倍率与模型定价，请稍候..."
         failure_message: "查询失败，请稍后重试"
-        empty_message: "未找到包含该关键词的模型"
-        success_template: |
-          包含“${query}”的模型（共 ${count} 个）：
-          ${foreach relation in relations}
-          模型：${relation.modelName}
-          ${if relation.groups}
-          ${foreach group in relation.groups}- ${group.name}
-          ${endforeach}
-          ${else}- （无可用分组）
-          ${endif}
-          ${endforeach}
+        empty_message: "未找到包含该关键词的分组"
+        output_mode: "image"
+        image_fallback_to_text: true
+        image_width_px: 1080
+        # 可用变量：${query}、${count}、${groups[i].name}、${groups[i].rate}、${groups[i].discount}、
+        # ${groups[i].models[j].name}、${groups[i].models[j].price.input}
+        success_template: ""
   # CLI Bridge 认证配置；接口请求会携带登录 JWT，并复用原 playwright-storage-state.json 中的 Cookie，响应更新会原子回写
   # 使用 CLI Bridge 在系统浏览器中登录，无需在配置中存储密码
   auth:

@@ -9,8 +9,10 @@ import kim.hhhhhy.x.webhook.config.WebHookDebug
 import kim.hhhhhy.x.webhook.model.ActionResult
 import kim.hhhhhy.x.webhook.model.ExecutionContext
 import kim.hhhhhy.x.webhook.scraper.GroupModelsRelation
+import kim.hhhhhy.x.webhook.scraper.GroupPricingDetail
 import kim.hhhhhy.x.webhook.scraper.ModelGroupRelation
 import kim.hhhhhy.x.webhook.scraper.ModelPlazaScraper
+import kim.hhhhhy.x.webhook.scraper.ModelPricingDetail
 import kim.hhhhhy.x.webhook.template.TemplateEngine
 import kim.hhhhhy.x.webhook.util.BlacklistConfig
 import kim.hhhhhy.x.webhook.util.FilterChain
@@ -22,8 +24,13 @@ import kim.hhhhhy.x.webhook.util.HttpProxySupport
 import kim.hhhhhy.x.webhook.util.LengthConfig
 import kim.hhhhhy.x.webhook.util.PatternConfig
 import kim.hhhhhy.x.webhook.util.WhitelistConfig
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import net.mamoe.mirai.contact.Contact
+import net.mamoe.mirai.message.data.MessageChainBuilder
 import net.mamoe.mirai.message.data.PlainText
+import net.mamoe.mirai.utils.ExternalResource.Companion.toExternalResource
 
 internal object ModelPlazaQueryAction {
     public suspend fun queryModels(action: ActionConfig, context: ExecutionContext): ActionResult = execute(
@@ -93,50 +100,61 @@ internal object ModelPlazaQueryAction {
 
             when (query) {
                 QueryKind.MODELS -> {
-                    val relations = prepareGroupRelations(
-                        ModelPlazaScraper.queryGroupModels(config, pattern),
+                    val details = prepareModelPricingDetails(
+                        ModelPlazaScraper.queryModelPricingDetails(
+                            config = config,
+                            modelPattern = pattern,
+                            maxModels = effectiveLimit(action, queryConfig),
+                            maxGroupsPerModel = effectiveRelatedLimit(action, queryConfig),
+                            includeEndpoints = effectiveIncludeEndpoints(action, queryConfig)
+                        ),
                         action,
                         queryConfig
                     )
-                    if (relations.isEmpty()) {
+                    if (details.isEmpty()) {
                         contact.sendMessage(PlainText(
                             ModelPlazaFormatter.renderMessage(responseFormat.emptyMessage, pattern, context)
                         ))
                     } else {
-                        contact.sendMessage(PlainText(
-                            ModelPlazaFormatter.formatGroupModels(
-                                query = pattern,
-                                relations = relations,
-                                responseFormat = responseFormat,
-                                actionTemplate = action.params["success_template"]?.toString(),
-                                context = context
-                            )
-                        ))
+                        val text = ModelPlazaFormatter.formatModelPricing(pattern, details, responseFormat, action, context)
+                        deliver(
+                            contact = contact,
+                            text = text,
+                            responseFormat = responseFormat,
+                            action = action,
+                            context = context,
+                            renderHtml = { ModelPlazaPriceCard.renderModels(details, cardOptions(action, responseFormat)) }
+                        )
                     }
-                    WebHookDebug.log("[ModelPlaza] 模型查询成功，共 ${relations.size} 个分组")
+                    WebHookDebug.log("[ModelPlaza] 模型查询成功，共 ${details.size} 个模型")
                 }
                 QueryKind.GROUPS -> {
-                    val relations = prepareModelRelations(
-                        ModelPlazaScraper.queryModelGroups(config, pattern),
+                    val details = prepareGroupPricingDetails(
+                        ModelPlazaScraper.queryGroupPricingDetails(
+                            config = config,
+                            groupPattern = pattern,
+                            maxGroups = effectiveLimit(action, queryConfig),
+                            maxModelsPerGroup = effectiveRelatedLimit(action, queryConfig)
+                        ),
                         action,
                         queryConfig
                     )
-                    if (relations.isEmpty()) {
+                    if (details.isEmpty()) {
                         contact.sendMessage(PlainText(
                             ModelPlazaFormatter.renderMessage(responseFormat.emptyMessage, pattern, context)
                         ))
                     } else {
-                        contact.sendMessage(PlainText(
-                            ModelPlazaFormatter.formatModelGroups(
-                                query = pattern,
-                                relations = relations,
-                                responseFormat = responseFormat,
-                                actionTemplate = action.params["success_template"]?.toString(),
-                                context = context
-                            )
-                        ))
+                        val text = ModelPlazaFormatter.formatGroupPricing(pattern, details, responseFormat, action, context)
+                        deliver(
+                            contact = contact,
+                            text = text,
+                            responseFormat = responseFormat,
+                            action = action,
+                            context = context,
+                            renderHtml = { ModelPlazaPriceCard.renderGroups(details, cardOptions(action, responseFormat)) }
+                        )
                     }
-                    WebHookDebug.log("[ModelPlaza] 分组查询成功，共 ${relations.size} 个模型")
+                    WebHookDebug.log("[ModelPlaza] 分组查询成功，共 ${details.size} 个分组")
                 }
             }
             return ActionResult(action.type, success = true, message = "query completed", status = 200)
@@ -242,12 +260,120 @@ internal object ModelPlazaQueryAction {
         )
     }
 
+    /**
+     * 模型结果只做排序与“每个模型保留多少个分组”的裁剪。
+     *
+     * 模型数量上限已经在下发查询时生效，避免为不会被展示的模型请求端点。
+     */
+    internal fun prepareModelPricingDetails(
+        details: List<ModelPricingDetail>,
+        action: ActionConfig,
+        config: ModelPlazaQueryConfig
+    ): List<ModelPricingDetail> {
+        val sorted = when (effectiveSort(action, config)) {
+            "alphabetical" -> details.sortedBy { it.modelName.lowercase() }
+            else -> details
+        }
+        val nestedLimit = effectiveRelatedLimit(action, config)
+        return sorted.map { detail ->
+            detail.copy(groups = if (nestedLimit > 0) detail.groups.take(nestedLimit) else detail.groups)
+        }
+    }
+
+    /** 分组结果只做排序与“每个分组保留多少个模型”的裁剪。 */
+    internal fun prepareGroupPricingDetails(
+        details: List<GroupPricingDetail>,
+        action: ActionConfig,
+        config: ModelPlazaQueryConfig
+    ): List<GroupPricingDetail> {
+        val sorted = when (effectiveSort(action, config)) {
+            "alphabetical" -> details.sortedBy { it.groupName.lowercase() }
+            else -> details
+        }
+        val nestedLimit = effectiveRelatedLimit(action, config)
+        return sorted.map { detail ->
+            detail.copy(models = if (nestedLimit > 0) detail.models.take(nestedLimit) else detail.models)
+        }
+    }
+
+    private fun effectiveIncludeEndpoints(action: ActionConfig, config: ModelPlazaQueryConfig): Boolean {
+        if (action.params.containsKey("include_endpoints")) {
+            return action.params["include_endpoints"].toString().trim().lowercase() in setOf("true", "1", "yes", "on")
+        }
+        return config.maxEndpointLookups != 0
+    }
+
+    internal fun cardOptions(
+        action: ActionConfig,
+        responseFormat: ModelPlazaResponseFormatConfig
+    ): ModelPlazaCardOptions {
+        val width = action.params["image_width_px"]?.toString()?.trim()?.toIntOrNull()
+            ?: responseFormat.imageWidthPx
+        return ModelPlazaCardOptions(
+            widthPx = width.coerceIn(720, 1600),
+            generatedAt = java.time.format.DateTimeFormatter
+                .ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(java.time.ZoneId.of("Asia/Shanghai"))
+                .format(java.time.Instant.now())
+        )
+    }
+
+    /**
+     * 按 output_mode 投递查询结果：image 只发图片，text 只发文本，both 文本 + 图片。
+     *
+     * 文本始终会被构造，用作图片渲染或上传失败时的回退，避免查询结果直接丢失。
+     */
+    private suspend fun deliver(
+        contact: Contact,
+        text: String,
+        responseFormat: ModelPlazaResponseFormatConfig,
+        action: ActionConfig,
+        context: ExecutionContext,
+        renderHtml: () -> String
+    ): Unit {
+        val outputMode = action.params["output_mode"]?.let { raw ->
+            TemplateEngine.renderString(raw.toString(), context).trim().lowercase()
+        }?.takeIf { it == "image" || it == "text" || it == "both" } ?: responseFormat.outputMode
+        val fallbackToText = action.params["image_fallback_to_text"]?.let { raw ->
+            TemplateEngine.renderString(raw.toString(), context).trim().lowercase() in setOf("true", "1", "yes", "on")
+        } ?: responseFormat.imageFallbackToText
+
+        if (outputMode == "text") {
+            contact.sendMessage(PlainText(text))
+            return
+        }
+
+        val image = try {
+            val bytes = withContext(Dispatchers.IO) { HtmlImageRenderer.render(renderHtml()) }
+            WebHookDebug.log("[ModelPlaza] 卡片渲染完成，bytes=${bytes.size}")
+            bytes.toExternalResource("png").use { resource -> contact.uploadImage(resource) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (!fallbackToText) throw error
+            WebHookDebug.log("[ModelPlaza] 图片投递失败，回退为文本：${error.message}")
+            contact.sendMessage(PlainText(text))
+            return
+        }
+
+        if (outputMode == "both") {
+            val builder = MessageChainBuilder()
+            if (text.isNotBlank()) {
+                builder.append(PlainText(text))
+                builder.append(PlainText("\n"))
+            }
+            builder.append(image)
+            contact.sendMessage(builder.build())
+        } else {
+            contact.sendMessage(image)
+        }
+    }
+
     internal fun prepareGroupRelations(
         relations: List<GroupModelsRelation>,
         action: ActionConfig,
         config: ModelPlazaQueryConfig
-    ): List<GroupModelsRelation> {
-        val sorted = when (effectiveSort(action, config)) {
+    ): List<GroupModelsRelation> {        val sorted = when (effectiveSort(action, config)) {
             "alphabetical" -> relations.sortedBy { it.groupName.lowercase() }
             else -> relations
         }
