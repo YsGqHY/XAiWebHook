@@ -27,24 +27,28 @@ internal data class EndpointGroupCluster(
  */
 internal object ModelPlazaPriceCard {
 
-    fun renderModels(details: List<ModelPricingDetail>, options: ModelPlazaCardOptions): String {
-        val body = details.mapIndexed { index, detail ->
-            buildString {
-                if (index > 0) append("<div class=\"divider\"></div>")
-                append(modelSection(detail))
-            }
-        }.joinToString("")
-        return page(body, options, title = details.firstOrNull()?.modelName)
-    }
+    fun renderModels(details: List<ModelPricingDetail>, options: ModelPlazaCardOptions): String =
+        renderPage(modelSections(details), options, title = details.firstOrNull()?.modelName)
 
-    fun renderGroups(details: List<GroupPricingDetail>, options: ModelPlazaCardOptions): String {
-        val body = details.mapIndexed { index, detail ->
-            buildString {
-                if (index > 0) append("<div class=\"divider\"></div>")
-                append(groupSection(detail))
-            }
+    fun renderGroups(details: List<GroupPricingDetail>, options: ModelPlazaCardOptions): String =
+        renderPage(groupSections(details), options, title = details.firstOrNull()?.groupName)
+
+    /**
+     * 每个模型一段独立 HTML，供分页器按字节预算组合成多页。
+     *
+     * 分页粒度必须是整段：表格若被页边界切开，openhtmltopdf 会留下半行，拼接处错位。
+     */
+    fun modelSections(details: List<ModelPricingDetail>): List<String> = details.map { modelSection(it) }
+
+    /** 每个分组一段独立 HTML，分页规则同 [modelSections]。 */
+    fun groupSections(details: List<GroupPricingDetail>): List<String> = details.map { groupSection(it) }
+
+    /** 把同一页的若干区块组装成一整张卡片；单页渲染与分页渲染共用这段逻辑。 */
+    fun renderPage(sections: List<String>, options: ModelPlazaCardOptions, title: String?): String {
+        val body = sections.mapIndexed { index, section ->
+            if (index == 0) section else "<div class=\"divider\"></div>$section"
         }.joinToString("")
-        return page(body, options, title = details.firstOrNull()?.groupName)
+        return page(body, options, title)
     }
 
     fun priceTable(price: TokenPrice): String = buildString {

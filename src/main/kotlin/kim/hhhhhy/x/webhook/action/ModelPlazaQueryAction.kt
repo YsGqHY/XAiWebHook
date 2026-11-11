@@ -123,7 +123,9 @@ internal object ModelPlazaQueryAction {
                             responseFormat = responseFormat,
                             action = action,
                             context = context,
-                            renderHtml = { ModelPlazaPriceCard.renderModels(details, cardOptions(action, responseFormat)) }
+                            sections = ModelPlazaPriceCard.modelSections(details),
+                            title = details.firstOrNull()?.modelName,
+                            options = cardOptions(action, responseFormat)
                         )
                     }
                     WebHookDebug.log("[ModelPlaza] 模型查询成功，共 ${details.size} 个模型")
@@ -151,7 +153,9 @@ internal object ModelPlazaQueryAction {
                             responseFormat = responseFormat,
                             action = action,
                             context = context,
-                            renderHtml = { ModelPlazaPriceCard.renderGroups(details, cardOptions(action, responseFormat)) }
+                            sections = ModelPlazaPriceCard.groupSections(details),
+                            title = details.firstOrNull()?.groupName,
+                            options = cardOptions(action, responseFormat)
                         )
                     }
                     WebHookDebug.log("[ModelPlaza] 分组查询成功，共 ${details.size} 个分组")
@@ -322,6 +326,7 @@ internal object ModelPlazaQueryAction {
      * 按 output_mode 投递查询结果：image 只发图片，text 只发文本，both 文本 + 图片。
      *
      * 文本始终会被构造，用作图片渲染或上传失败时的回退，避免查询结果直接丢失。
+     * 结果按 `image_max_bytes` 预算拆成多页，每页单独一张图片，避免单图越过 OneBot 上传上限。
      */
     private suspend fun deliver(
         contact: Contact,
@@ -329,7 +334,9 @@ internal object ModelPlazaQueryAction {
         responseFormat: ModelPlazaResponseFormatConfig,
         action: ActionConfig,
         context: ExecutionContext,
-        renderHtml: () -> String
+        sections: List<String>,
+        title: String?,
+        options: ModelPlazaCardOptions
     ): Unit {
         val outputMode = action.params["output_mode"]?.let { raw ->
             TemplateEngine.renderString(raw.toString(), context).trim().lowercase()
@@ -343,10 +350,18 @@ internal object ModelPlazaQueryAction {
             return
         }
 
-        val image = try {
-            val bytes = withContext(Dispatchers.IO) { HtmlImageRenderer.render(renderHtml()) }
-            WebHookDebug.log("[ModelPlaza] 卡片渲染完成，bytes=${bytes.size}")
-            bytes.toExternalResource("png").use { resource -> contact.uploadImage(resource) }
+        val images = try {
+            val pages = withContext(Dispatchers.IO) {
+                ModelPlazaImagePacker.paginate(
+                    sections = sections,
+                    maxBytes = ModelPlazaImagePacker.DEFAULT_MAX_BYTES,
+                    renderPage = { chunk -> HtmlImageRenderer.render(ModelPlazaPriceCard.renderPage(chunk, options, title)) }
+                )
+            }
+            logPageSizes(pages, sections.size)
+            pages.map { bytes ->
+                bytes.toExternalResource("png").use { resource -> contact.uploadImage(resource) }
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -362,10 +377,25 @@ internal object ModelPlazaQueryAction {
                 builder.append(PlainText(text))
                 builder.append(PlainText("\n"))
             }
-            builder.append(image)
+            images.forEach { builder.append(it) }
             contact.sendMessage(builder.build())
         } else {
-            contact.sendMessage(image)
+            if (images.size == 1) {
+                contact.sendMessage(images.first())
+            } else {
+                val builder = MessageChainBuilder()
+                images.forEach { builder.append(it) }
+                contact.sendMessage(builder.build())
+            }
+        }
+    }
+
+    /** 记录每页字节数，便于判断上传失败时是否因单图过大。 */
+    private fun logPageSizes(pages: List<ByteArray>, sectionCount: Int): Unit {
+        val detail = pages.mapIndexed { index, bytes -> "${index + 1}:${bytes.size}" }.joinToString(", ")
+        WebHookDebug.log("[ModelPlaza] 卡片分页完成，区块=$sectionCount，页数=${pages.size}，字节[$detail]")
+        if (pages.size == 1 && sectionCount > 1) {
+            WebHookDebug.log("[ModelPlaza] 单页容量告警：整卡仍超过字节预算，可调小 image_width_px")
         }
     }
 
