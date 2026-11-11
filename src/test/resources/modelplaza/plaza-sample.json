@@ -1,0 +1,425 @@
+{
+  "code": 0,
+  "message": "success",
+  "data": [
+    {
+      "platform": "anthropic",
+      "models": [
+        {
+          "name": "claude-fable-5-1",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_read_price": 0.25
+          },
+          "official_pricing": {
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_write_1h_price": 20,
+            "cache_read_price": 0.25
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "anthropic",
+          "display_config": {},
+          "id": 132,
+          "name": "Claude-Cursor低缓存",
+          "rate_multiplier": 0.4,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "anthropic",
+      "models": [
+        {
+          "name": "claude-fable-5-1",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_read_price": 0.25
+          },
+          "official_pricing": {
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_write_1h_price": 20,
+            "cache_read_price": 0.25
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "anthropic",
+          "display_config": {},
+          "id": 28,
+          "name": "ClaudeMax",
+          "rate_multiplier": 1.5,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "anthropic",
+      "models": [
+        {
+          "name": "claude-fable-5-1",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_read_price": 0.25
+          },
+          "official_pricing": {
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_write_1h_price": 20,
+            "cache_read_price": 0.25
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "anthropic",
+          "display_config": {},
+          "id": 76,
+          "name": "ClaudeMax-满血稳定企业",
+          "rate_multiplier": 1.6,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "anthropic",
+      "models": [
+        {
+          "name": "claude-fable-5-1",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_read_price": 0.25
+          },
+          "official_pricing": {
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_write_1h_price": 20,
+            "cache_read_price": 0.25
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "anthropic",
+          "display_config": {},
+          "id": 129,
+          "name": "ccmax-纯文本满血",
+          "rate_multiplier": 0.35,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "anthropic",
+      "models": [
+        {
+          "name": "claude-fable-5-1",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_read_price": 0.25
+          },
+          "official_pricing": {
+            "input_price": 10,
+            "output_price": 50,
+            "cache_write_price": 12.5,
+            "cache_write_1h_price": 20,
+            "cache_read_price": 0.25
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "anthropic",
+          "display_config": {},
+          "id": 130,
+          "name": "ccmax-纯文本满血-按次0.3",
+          "rate_multiplier": 1,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "deepseek",
+      "models": [
+        {
+          "name": "deepseek-v4.1-flash",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 1,
+            "output_price": 4,
+            "cache_read_price": 0.02,
+            "time_pricing": {
+              "timezone": "Asia/Shanghai",
+              "peak_pricing_windows": "",
+              "peak_pricing_weekly_windows": {
+                "1": [
+                  {
+                    "start": "09:00",
+                    "end": "12:00"
+                  },
+                  {
+                    "start": "14:00",
+                    "end": "18:00"
+                  }
+                ],
+                "2": [
+                  {
+                    "start": "09:00",
+                    "end": "12:00"
+                  },
+                  {
+                    "start": "14:00",
+                    "end": "18:00"
+                  }
+                ],
+                "3": [
+                  {
+                    "start": "09:00",
+                    "end": "12:00"
+                  },
+                  {
+                    "start": "14:00",
+                    "end": "18:00"
+                  }
+                ],
+                "4": [
+                  {
+                    "start": "09:00",
+                    "end": "12:00"
+                  },
+                  {
+                    "start": "14:00",
+                    "end": "18:00"
+                  }
+                ],
+                "5": [
+                  {
+                    "start": "09:00",
+                    "end": "12:00"
+                  },
+                  {
+                    "start": "14:00",
+                    "end": "18:00"
+                  }
+                ],
+                "6": [],
+                "7": []
+              },
+              "off_peak": {
+                "input_price": 1,
+                "output_price": 4,
+                "cache_write_price": 0,
+                "cache_read_price": 0.02
+              },
+              "peak": {
+                "input_price": 2,
+                "output_price": 8,
+                "cache_write_price": 0,
+                "cache_read_price": 0.04
+              }
+            }
+          },
+          "official_pricing": {
+            "input_price": 1,
+            "output_price": 4,
+            "cache_write_price": null,
+            "cache_read_price": 0.02
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "deepseek",
+          "display_config": {},
+          "id": 98,
+          "name": "Deepseek",
+          "rate_multiplier": 0.7,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "deepseek",
+      "models": [
+        {
+          "name": "deepseek-v4.1-flash",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 0.19999999999999998,
+            "output_price": 1.2,
+            "cache_write_price": 0,
+            "cache_read_price": 0.01,
+            "is_final_price": true
+          },
+          "official_pricing": {
+            "input_price": 1,
+            "output_price": 4,
+            "cache_write_price": null,
+            "cache_read_price": 0.02
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "openai",
+          "display_config": {
+            "icon": "zhipu",
+            "color": "#F23F5D"
+          },
+          "id": 104,
+          "name": "国模福利",
+          "rate_multiplier": 0.1,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    },
+    {
+      "platform": "deepseek",
+      "models": [
+        {
+          "name": "deepseek-v4.1-flash",
+          "badge": "新",
+          "pricing": {
+            "billing_mode": "token",
+            "input_price": 0.19999999999999998,
+            "output_price": 1.2,
+            "cache_write_price": 0,
+            "cache_read_price": 0.02,
+            "is_final_price": true
+          },
+          "official_pricing": {
+            "input_price": 1,
+            "output_price": 4,
+            "cache_write_price": null,
+            "cache_read_price": 0.02
+          }
+        }
+      ],
+      "groups": [
+        {
+          "platform": "openai",
+          "display_config": {
+            "vendor": "deepseek",
+            "icon": "deepseek",
+            "color": "#F23F5D"
+          },
+          "id": 106,
+          "name": "特价Ds-v4.1f",
+          "rate_multiplier": 0.15,
+          "is_exclusive": false,
+          "image_rate_independent": false,
+          "image_rate_multiplier": 1,
+          "video_rate_independent": false,
+          "video_rate_multiplier": 1,
+          "peak_rate_enabled": false,
+          "peak_start": "",
+          "peak_end": "",
+          "peak_rate_multiplier": 1,
+          "peak_effective": false,
+          "subscription_type": "standard"
+        }
+      ]
+    }
+  ]
+}
