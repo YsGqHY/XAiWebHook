@@ -166,6 +166,9 @@ model_plaza:
         image_fallback_to_text: true
         # 卡片宽度（像素），默认 1080，范围 720-1600
         image_width_px: 1080
+        # 单张图片的字节预算，默认 1200000，范围 200000-5000000；
+        # 结果超出预算时按模型自动拆成多张图片发送，避免单图越过 OneBot 上传上限（2 MiB）
+        image_max_bytes: 1200000
         # 成功模板支持 foreach、if/else、format_number 等安全模板语法
         # 可用变量：${query}、${count}、${models[i].name}、${models[i].badge}、
         # ${models[i].official.input}、${models[i].groups[j].name}、${models[i].groups[j].rate}、
@@ -195,6 +198,8 @@ model_plaza:
         output_mode: "image"
         image_fallback_to_text: true
         image_width_px: 1080
+        # 分组查询同样按此预算分页，避免模型很多的分组撑出超大图片
+        image_max_bytes: 1200000
         # 可用变量：${query}、${count}、${groups[i].name}、${groups[i].rate}、${groups[i].discount}、
         # ${groups[i].models[j].name}、${groups[i].models[j].price.input}
         success_template: ""

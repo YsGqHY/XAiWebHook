@@ -354,7 +354,7 @@ internal object ModelPlazaQueryAction {
             val pages = withContext(Dispatchers.IO) {
                 ModelPlazaImagePacker.paginate(
                     sections = sections,
-                    maxBytes = ModelPlazaImagePacker.DEFAULT_MAX_BYTES,
+                    maxBytes = effectiveMaxBytes(action, responseFormat),
                     renderPage = { chunk -> HtmlImageRenderer.render(ModelPlazaPriceCard.renderPage(chunk, options, title)) }
                 )
             }
@@ -395,8 +395,18 @@ internal object ModelPlazaQueryAction {
         val detail = pages.mapIndexed { index, bytes -> "${index + 1}:${bytes.size}" }.joinToString(", ")
         WebHookDebug.log("[ModelPlaza] 卡片分页完成，区块=$sectionCount，页数=${pages.size}，字节[$detail]")
         if (pages.size == 1 && sectionCount > 1) {
-            WebHookDebug.log("[ModelPlaza] 单页容量告警：整卡仍超过字节预算，可调小 image_width_px")
+            WebHookDebug.log("[ModelPlaza] 单页容量告警：整卡仍超过字节预算，可调小 image_width_px 或增大 image_max_bytes")
         }
+    }
+
+    /** action 上的 image_max_bytes 优先于 response_format 配置，取值范围与配置解析保持一致。 */
+    internal fun effectiveMaxBytes(
+        action: ActionConfig,
+        responseFormat: ModelPlazaResponseFormatConfig
+    ): Int {
+        val configured = action.params["image_max_bytes"]?.toString()?.trim()?.toIntOrNull()
+            ?: responseFormat.imageMaxBytes
+        return configured.coerceIn(200_000, 5_000_000)
     }
 
     internal fun prepareGroupRelations(

@@ -402,7 +402,9 @@ internal object WebHookConfig {
                 defaults.responseFormat.imageFallbackToText
             ),
             imageWidthPx = responseMap.int("image_width_px", defaults.responseFormat.imageWidthPx)
-                .coerceIn(720, 1600)
+                .coerceIn(720, 1600),
+            imageMaxBytes = responseMap.int("image_max_bytes", defaults.responseFormat.imageMaxBytes)
+                .coerceIn(200_000, 5_000_000)
         )
         val sort = map.string("sort", defaults.sort).lowercase()
             .takeIf { it == "source" || it == "alphabetical" } ?: defaults.sort
@@ -801,7 +803,14 @@ internal data class ModelPlazaResponseFormatConfig(
     /** 图片渲染或上传失败时是否回退为文本，默认开启以免查询结果丢失。 */
     val imageFallbackToText: Boolean = true,
     /** 卡片宽度，单位像素。 */
-    val imageWidthPx: Int = 1080
+    val imageWidthPx: Int = 1080,
+    /**
+     * 单张卡片的字节预算，超出则把结果拆成多张图片。
+     *
+     * OneBot 实现的上传通道有单图上限（SnowLuma 的 highway 上传在 2 MiB 处失败），
+     * 模型较多时整卡可轻易越过该上限，导致整条消息发送失败。
+     */
+    val imageMaxBytes: Int = 1_200_000
 )
 
 internal data class ModelPlazaAuthConfig(
