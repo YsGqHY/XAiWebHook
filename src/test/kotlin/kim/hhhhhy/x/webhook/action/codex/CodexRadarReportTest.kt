@@ -511,6 +511,54 @@ internal class CodexRadarReportTest {
     }
 
     @Test
+    fun radarItemXPathStaysInsideTheTotalScorePanel(): Unit {
+        // 站点把雷达分表格拆成多个 tab 面板后，页面里 230 个 button[data-cir-setting] 只有
+        // 总分面板的 46 个是真分数，其余是画作分或糖果题对错；条目选择器必须锁在总分面板内。
+        val items = CodexRadarAction.RADAR_ITEMS_XPATH
+
+        assertTrue(items.startsWith(CodexRadarAction.RADAR_CONTAINER_XPATH))
+        assertTrue(CodexRadarAction.RADAR_SCORE_PANEL_XPATH.contains("data-cir-panel=\"total\""))
+        assertTrue(CodexRadarAction.RADAR_SCORE_PANEL_XPATH.contains("cir-panel-total"))
+        assertTrue(items.endsWith("//button[@data-cir-setting]"))
+        // 不能把三个画作面板或糖果面板的条目再匹配进来
+        assertTrue(CodexRadarAction.browserRequestsForTest().first().itemSelector == items)
+    }
+
+    @Test
+    fun statusMarkerRowsAreSkippedAsNonScores(): Unit {
+        // 糖果题面板的分数单元格是 ✓/×；这类行既不是分数，也不是页面结构损坏。
+        val result = result(
+            item(1, "GPT-6.1 Sol ultra · 131.73 · USD 1.59 · 2519.7 秒", "131.73", "131.73\n1.59刀\n41.99分钟"),
+            item(2, "GPT-6.1 Sol max · ✓ · USD 0.05 · 69.8 秒", "✓", "✓\n0.05刀\n1.16分钟"),
+            item(3, "GPT-6 Luna medium · × · USD 0.000979 · 20.9 秒", "×", "×\n0.000979刀\n0.35分钟")
+        )
+
+        val parsed = CodexRadarParser.parseRadarRows(result)
+
+        assertEquals(1, parsed.scores.size)
+        assertEquals(131.73, parsed.scores[0].value, 1e-9)
+        assertEquals(2, parsed.skipped.size)
+        assertTrue(parsed.skipped.all { row -> row.reason.contains("对错标记") })
+        assertTrue(parsed.skipped.none { row -> row.reason.contains("不是数字") })
+    }
+
+    @Test
+    fun duplicateModelEffortCellsKeepTheFirstRow(): Unit {
+        // 多面板同时被读到时同一 model|effort 会重复出现，只保留首个单元格，避免摘要与图表重复。
+        val result = result(
+            item(1, "GPT-6.1 Sol ultra · 131.73 · USD 1.59", "131.73", "131.73"),
+            item(2, "GPT-6.1 Sol ultra · 42.0 · USD 1.59", "42.0", "42.0")
+        )
+
+        val parsed = CodexRadarParser.parseRadarRows(result)
+
+        assertEquals(1, parsed.scores.size)
+        assertEquals(131.73, parsed.scores[0].value, 1e-9)
+        assertEquals(1, parsed.skipped.size)
+        assertTrue(parsed.skipped.single().reason.contains("重复条目"))
+    }
+
+    @Test
     fun singleUnloadedRowIsSkippedWithoutBreakingOtherRows(): Unit {
         val result = result(
             item(1, "GPT-6 Astra ultra", "121.1", "GPT-6 Astra ultra\n121.1"),

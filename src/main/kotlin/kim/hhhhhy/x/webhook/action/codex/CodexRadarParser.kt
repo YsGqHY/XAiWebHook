@@ -16,6 +16,8 @@ internal object CodexRadarParser {
     private val EFFORT_PREFIX_PATTERN =
         Regex("^(.+?)\\s+(low|medium|high|xhigh|max|ultra)(?=\\s|$)", RegexOption.IGNORE_CASE)
     private val RATING_COUNT_PATTERN = Regex("(\\d+)\\s*人评分")
+    // 站点把“糖果”这类单选题的对错直接渲染进分数单元格（✓/×），它不是分数，按无分数跳过。
+    internal val STATUS_MARKERS = setOf("✓", "✔", "×", "✕", "✗", "√", "对", "错")
     private val PLACEHOLDER_VALUES = setOf(
         "",
         "—",
@@ -72,10 +74,24 @@ internal object CodexRadarParser {
 
         val scores = mutableListOf<CodexRadarScore>()
         val skipped = mutableListOf<CodexRadarSkippedRow>()
+        val seenKeys = HashSet<String>(result.items.size)
         result.items.forEachIndexed { index, item ->
             val parsed = parseRow(kind, item, maximum)
             when (parsed) {
-                is RowOutcome.Valid -> scores += parsed.score
+                is RowOutcome.Valid -> {
+                    // 同一“模型 + 档位”只保留首个单元格：页面同时渲染多个视图面板时
+                    // 会出现同键条目，保留首条可避免摘要与图表出现重复行。
+                    if (seenKeys.add(parsed.score.key)) {
+                        scores += parsed.score
+                    } else {
+                        skipped += CodexRadarSkippedRow(
+                            kind = kind,
+                            index = index,
+                            label = parsed.score.label,
+                            reason = "重复条目（同一模型档位已在前面的行解析，保留首条）"
+                        )
+                    }
+                }
                 is RowOutcome.Skipped -> skipped += CodexRadarSkippedRow(
                     kind = kind,
                     index = index,
@@ -110,6 +126,12 @@ internal object CodexRadarParser {
     ): RowOutcome {
         val label = displayLabel(item)
         return try {
+            val raw = item.statusText?.trim().orEmpty()
+            if (raw in STATUS_MARKERS) {
+                // 分数单元格里是 ✓/× 这类对错标记，说明这一行不是分数视图（如糖果题面板），
+                // 按“无分数”跳过即可，不应判定为页面结构损坏。
+                return RowOutcome.Skipped(label, "分数单元格显示对错标记“$raw”，该行不代表分数")
+            }
             val score = parseScore(kind, item) ?: return RowOutcome.Skipped(label, "分数未加载")
             val (model, effort) = parseLabel(kind, label)
             val count = RATING_COUNT_PATTERN.find(item.itemText.orEmpty())

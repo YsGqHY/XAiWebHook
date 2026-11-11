@@ -46,6 +46,7 @@ internal object CodexRadarAction {
     private const val PART_ID = "codex-radar-page"
     private const val ACTION_ID = "codex-radar-page-reader"
     private const val MAX_ITEMS = 256
+    private const val MAX_LOGGED_SKIPPED_ROWS = 6
     private const val MAX_CACHE_TTL_MILLIS = 30L * 24L * 60L * 60L * 1000L
     private const val MAX_REFRESH_INTERVAL_MILLIS = 30L * 24L * 60L * 60L * 1000L
 
@@ -57,12 +58,29 @@ internal object CodexRadarAction {
      *   以 `.cir-table` 表格呈现：行为模型、列为思考档位，单元格为 `button[data-cir-setting]`；
      * - 旧卡片属性 `data-efficiency-card` 不再存在；
      * - 社区体感分仍在 `#model-ratings`，但改由 `article.mr-card[data-rating-model]` 承载。
+     *
+     * 之后站点又把雷达分表格拆成多个 `data-cir-panel` 视图（总分/秦始皇/庞贝/鹈鹕/糖果），
+     * 真分数只在总分面板里，详见 [RADAR_SCORE_PANEL_XPATH]。
      */
     const val RADAR_CONTAINER_XPATH: String = "//*[@id=\"iq\"]//*[@data-chapter=\"iq\"]"
     const val COMMUNITY_CONTAINER_XPATH: String = "//*[@id=\"model-ratings\"]"
 
-    private const val RADAR_ITEMS_XPATH =
-        "$RADAR_CONTAINER_XPATH//button[@data-cir-setting]"
+    /**
+     * 雷达分表格被站点改成了多 tab 面板：`总分 / 秦始皇 / 庞贝 / 鹈鹕 / 糖果`，
+     * 每个面板各有 46 个 `button[data-cir-setting]`，合计 230 个。
+     *
+     * - `总分`（`[data-cir-panel="total"]`）才是 150 分制的雷达分，`strong` 里是数字；
+     * - `秦始皇 / 庞贝 / 鹈鹕` 面板是画作缩略图卡（`button.cir-art-card`），`strong` 里是 100 分制画作分；
+     * - `糖果` 面板是单选题对错（`strong` 里是 `✓/×`），按 22.5 分计入总分。
+     *
+     * 因此必须把条目收敛到总分面板：否则 230 个条目里只有 46 个是真分数，
+     * 46 个 `✓/×` 会被当成非法分数，另外 138 个画作分还会与同 model|effort 的真实雷达分重名。
+     */
+    internal const val RADAR_SCORE_PANEL_XPATH: String =
+        "//*[@data-cir-panel=\"total\" or @id=\"cir-panel-total\"]"
+
+    internal const val RADAR_ITEMS_XPATH: String =
+        "$RADAR_CONTAINER_XPATH$RADAR_SCORE_PANEL_XPATH//button[@data-cir-setting]"
     private const val COMMUNITY_ITEMS_XPATH =
         "$COMMUNITY_CONTAINER_XPATH//*[@data-rating-model]"
 
@@ -548,7 +566,7 @@ internal object CodexRadarAction {
                 if (skipped.isNotEmpty()) {
                     CodexRadarLog.warning(
                         "Codex Radar 有 ${skipped.size} 条数据本次未缓存（已跳过，不影响其它条目）：" +
-                            skipped.joinToString("；") { row -> row.describe() }
+                            summarizeSkippedRows(skipped)
                     )
                 }
             }
@@ -557,6 +575,22 @@ internal object CodexRadarAction {
         } catch (error: Throwable) {
             throw CodexRadarException("Codex Radar 最终解析失败：${summarize(error)}", error)
         }
+    }
+
+    /**
+     * 跳过条目的日志摘要：只逐条列出前 [MAX_LOGGED_SKIPPED_ROWS] 行，其余按原因归并计数。
+     * 站点改版时可能出现几十上百行同时被跳过，全量拼接会让单条 W 日志膨胀到无法阅读。
+     */
+    private fun summarizeSkippedRows(skipped: List<CodexRadarSkippedRow>): String {
+        val head = skipped.take(MAX_LOGGED_SKIPPED_ROWS).joinToString("；") { row -> row.describe() }
+        if (skipped.size <= MAX_LOGGED_SKIPPED_ROWS) return head
+        val restByKind = skipped
+            .drop(MAX_LOGGED_SKIPPED_ROWS)
+            .groupingBy { row -> "${row.kind}（${row.reason}）" }
+            .eachCount()
+            .entries
+            .joinToString("；") { (key, count) -> "$key 共 $count 条" }
+        return "$head；……另外 ${skipped.size - MAX_LOGGED_SKIPPED_ROWS} 条已省略：$restByKind"
     }
 
     internal fun parsePartialSnapshotForTest(
@@ -625,6 +659,8 @@ internal object CodexRadarAction {
     private fun logReadinessStats(prefix: String, stats: CodexRadarReadinessStats): Unit {
         CodexRadarLog.warning("$prefix：${stats.summary()}")
     }
+
+    internal fun browserRequestsForTest(): List<BrowserTextListRequest> = browserRequests()
 
     private fun browserRequests(): List<BrowserTextListRequest> = listOf(
         BrowserTextListRequest(
@@ -925,7 +961,11 @@ internal class CodexRadarReadinessEvaluator {
             val raw = item.statusText?.trim().orEmpty()
             val itemText = item.itemText.orEmpty()
             val placeholderValue = raw in PLACEHOLDER_VALUES || raw.startsWith("未读取")
-            val finalValue = itemText.contains("数据不足") ||
+            // 分数单元格是 ✓/× 说明该行来自对错视图而不是分数视图，属于“本来就没有分数”，
+            // 与“数据不足/不支持”同属最终缺分，不能算非法值拖住就绪判定。
+            val markerValue = raw in CodexRadarParser.STATUS_MARKERS
+            val finalValue = markerValue ||
+                itemText.contains("数据不足") ||
                 itemText.contains("不支持") ||
                 raw == "数据不足" ||
                 raw == "不支持"
